@@ -1091,6 +1091,8 @@ mod tests {
         reads: VecDeque<Result<u8, c_int>>,
         /// Optional error returned by the next data write.
         next_write_error: Option<c_int>,
+        /// Script individual writes to exercise failures after a partial protocol sequence.
+        write_results: VecDeque<Result<(), c_int>>,
     }
 
     /// In-memory transport used to exercise the public lock-free boundary.
@@ -1103,6 +1105,7 @@ mod tests {
         /// Record one complete data byte or consume the scripted write failure.
         fn write_data(&mut self, data: u8) -> Result<(), c_int> {
             let mut state = self.state.lock().expect("fake transport state");
+            state.write_results.pop_front().unwrap_or(Ok(()))?;
             if let Some(error) = state.next_write_error.take() {
                 return Err(error);
             }
@@ -1959,6 +1962,117 @@ mod tests {
         let (device, state) = fake_device(&config);
         assert_eq!(device.clear_rtx_transmit(), GPIO_OK);
         assert_eq!(state.lock().expect("fake transport state").writes, [0xe7]);
+    }
+
+    /// Reject unavailable protocol pins but preserve the legacy zero-receive no-op.
+    #[test]
+    fn protocol_write_failures_stop_before_later_control_bytes() {
+        for failing_write in [0, 1] {
+            let (device, state) = fake_device(&protocol_config(0));
+            state.lock().expect("fake transport state").write_results =
+                std::iter::repeat_n(Ok(()), failing_write)
+                    .chain([Err(-5)])
+                    .collect();
+            assert_eq!(device.set_binary_channel(5), GPIO_IO_ERROR);
+            assert_eq!(
+                state.lock().expect("fake transport state").writes.len(),
+                failing_write
+            );
+        }
+        for failing_write in [0, 64, 128] {
+            let (device, state) = fake_device(&protocol_config(0));
+            state.lock().expect("fake transport state").write_results =
+                std::iter::repeat_n(Ok(()), failing_write)
+                    .chain([Err(-5)])
+                    .collect();
+            assert_eq!(
+                device.program_rtx(146_940_000, 146_340_000, 0, 0),
+                GPIO_IO_ERROR
+            );
+            assert_eq!(
+                state.lock().expect("fake transport state").writes.len(),
+                failing_write
+            );
+        }
+        for transmitting in [0, 1] {
+            let (device, state) = fake_device(&protocol_config(0));
+            assert_eq!(
+                device.program_rtx(146_940_000, 146_340_000, transmitting, 0),
+                GPIO_OK
+            );
+            let state = state.lock().expect("fake transport state");
+            assert_eq!(state.writes.len(), 129);
+            assert_eq!(
+                state.writes[128] & RTX_TRANSMIT_MASK != 0,
+                transmitting != 0
+            );
+        }
+        let (device, state) = fake_device(&protocol_config(0xff));
+        state.lock().expect("fake transport state").next_write_error = Some(-5);
+        assert_eq!(device.clear_rtx_transmit(), GPIO_IO_ERROR);
+        assert!(
+            state
+                .lock()
+                .expect("fake transport state")
+                .writes
+                .is_empty()
+        );
+    }
+
+    /// Validate pulse widths and null arguments without publishing any transport operation.
+    #[test]
+    fn pulse_noops_and_remaining_invalid_fields_do_not_publish_io() {
+        let (mut device, state) = fake_device(&ffi_config());
+        let mut pulse = inverting_pulse(0, 0);
+        pulse.cancel_pulse = 2;
+        assert_eq!(
+            device.publish_inverting_pulse(&pulse),
+            GPIO_INVALID_ARGUMENT
+        );
+        pulse.cancel_pulse = 1;
+        pulse.invert_mask = 1;
+        assert_eq!(
+            device.publish_inverting_pulse(&pulse),
+            GPIO_INVALID_ARGUMENT
+        );
+        pulse.cancel_pulse = 0;
+        pulse.invert_mask = 0;
+        assert_eq!(device.publish_inverting_pulse(&pulse), GPIO_OK);
+        assert_eq!(device.pulse_generation.load(Ordering::Acquire), 0);
+        assert_eq!(
+            parallel_publish_inverting_pulse(ptr::null_mut(), &pulse),
+            GPIO_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            parallel_publish_inverting_pulse(&mut device, ptr::null()),
+            GPIO_INVALID_ARGUMENT
+        );
+        let mut scheduled = scheduled_inverting_pulse(0, 0, 256);
+        assert_eq!(
+            device.schedule_inverting_pulse(&scheduled),
+            GPIO_INVALID_ARGUMENT
+        );
+        scheduled.cancel_mask = 0;
+        scheduled.pulse_duration_milliseconds = 1;
+        assert_eq!(
+            device.schedule_inverting_pulse(&scheduled),
+            GPIO_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            parallel_schedule_inverting_pulse(ptr::null_mut(), &scheduled),
+            GPIO_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            parallel_schedule_inverting_pulse(&mut device, ptr::null()),
+            GPIO_INVALID_ARGUMENT
+        );
+        assert!(
+            state
+                .lock()
+                .expect("fake transport state")
+                .writes
+                .is_empty()
+        );
     }
 
     /// Reject unavailable protocol pins but preserve the legacy zero-receive no-op.

@@ -387,6 +387,7 @@ pub(crate) trait TestLibusbBackend: Send {
 
 /// One test-only installed backend, serialized so parallel unit tests cannot cross-contaminate.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 fn test_backend_slot() -> &'static Mutex<Option<Box<dyn TestLibusbBackend>>> {
     static SLOT: OnceLock<Mutex<Option<Box<dyn TestLibusbBackend>>>> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))
@@ -394,6 +395,7 @@ fn test_backend_slot() -> &'static Mutex<Option<Box<dyn TestLibusbBackend>>> {
 
 /// Serialize tests that replace the libusb backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 fn test_backend_serial_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -418,6 +420,7 @@ pub(crate) struct TestBackendGuard {
 
 #[cfg(test)]
 impl Drop for TestBackendGuard {
+    #[cfg_attr(coverage, coverage(off))]
     fn drop(&mut self) {
         *test_lock(test_backend_slot()) = None;
     }
@@ -425,6 +428,7 @@ impl Drop for TestBackendGuard {
 
 /// Install one deterministic backend for the duration of a unit test.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) fn install_test_backend(backend: Box<dyn TestLibusbBackend>) -> TestBackendGuard {
     let serial = test_lock(test_backend_serial_lock());
     *test_lock(test_backend_slot()) = Some(backend);
@@ -433,6 +437,7 @@ pub(crate) fn install_test_backend(backend: Box<dyn TestLibusbBackend>) -> TestB
 
 /// Invoke the installed test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 fn with_test_backend<T>(operation: impl FnOnce(&mut dyn TestLibusbBackend) -> T) -> T {
     let mut slot = test_lock(test_backend_slot());
     let backend = slot
@@ -443,6 +448,7 @@ fn with_test_backend<T>(operation: impl FnOnce(&mut dyn TestLibusbBackend) -> T)
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_init(context: *mut *mut LibusbContext) -> c_int {
     with_test_backend(|backend| {
         // SAFETY: the caller preserves libusb's public argument contract.
@@ -452,6 +458,7 @@ pub(crate) unsafe fn libusb_init(context: *mut *mut LibusbContext) -> c_int {
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_exit(context: *mut LibusbContext) {
     with_test_backend(|backend| {
         // SAFETY: the caller preserves libusb's public argument contract.
@@ -461,6 +468,7 @@ pub(crate) unsafe fn libusb_exit(context: *mut LibusbContext) {
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_get_device_list(
     context: *mut LibusbContext,
     devices: *mut *mut *mut LibusbDevice,
@@ -473,6 +481,7 @@ pub(crate) unsafe fn libusb_get_device_list(
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_free_device_list(
     devices: *mut *mut LibusbDevice,
     unref_devices: c_int,
@@ -485,6 +494,7 @@ pub(crate) unsafe fn libusb_free_device_list(
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_get_device_descriptor(
     device: *mut LibusbDevice,
     descriptor: *mut LibusbDeviceDescriptor,
@@ -497,6 +507,7 @@ pub(crate) unsafe fn libusb_get_device_descriptor(
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_get_bus_number(device: *mut LibusbDevice) -> c_uchar {
     with_test_backend(|backend| {
         // SAFETY: the caller preserves libusb's public argument contract.
@@ -506,6 +517,7 @@ pub(crate) unsafe fn libusb_get_bus_number(device: *mut LibusbDevice) -> c_uchar
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_get_port_numbers(
     device: *mut LibusbDevice,
     ports: *mut c_uchar,
@@ -519,6 +531,7 @@ pub(crate) unsafe fn libusb_get_port_numbers(
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_open(
     device: *mut LibusbDevice,
     handle: *mut *mut LibusbDeviceHandle,
@@ -531,6 +544,7 @@ pub(crate) unsafe fn libusb_open(
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_get_string_descriptor_ascii(
     handle: *mut LibusbDeviceHandle,
     descriptor_index: c_uchar,
@@ -545,6 +559,7 @@ pub(crate) unsafe fn libusb_get_string_descriptor_ascii(
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_close(handle: *mut LibusbDeviceHandle) {
     with_test_backend(|backend| {
         // SAFETY: the caller preserves libusb's public argument contract.
@@ -554,6 +569,7 @@ pub(crate) unsafe fn libusb_close(handle: *mut LibusbDeviceHandle) {
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_claim_interface(
     handle: *mut LibusbDeviceHandle,
     interface: c_int,
@@ -566,6 +582,7 @@ pub(crate) unsafe fn libusb_claim_interface(
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_release_interface(
     handle: *mut LibusbDeviceHandle,
     interface: c_int,
@@ -578,6 +595,7 @@ pub(crate) unsafe fn libusb_release_interface(
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_kernel_driver_active(
     handle: *mut LibusbDeviceHandle,
     interface: c_int,
@@ -590,6 +608,7 @@ pub(crate) unsafe fn libusb_kernel_driver_active(
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_detach_kernel_driver(
     handle: *mut LibusbDeviceHandle,
     interface: c_int,
@@ -602,6 +621,7 @@ pub(crate) unsafe fn libusb_detach_kernel_driver(
 
 /// Invoke the deterministic test backend.
 #[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
 pub(crate) unsafe fn libusb_control_transfer(transfer: LibusbControlTransfer) -> c_int {
     with_test_backend(|backend| {
         // SAFETY: the caller preserves libusb's public argument contract.

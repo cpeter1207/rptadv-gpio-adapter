@@ -1020,6 +1020,88 @@ fn cm119_inverting_pulse_validates_its_mask_duration_and_cancel_contract() {
     );
 }
 
+/// Reject invalid pulse widths and null pointers without publishing an output action.
+#[test]
+fn cm119_pulse_rejects_invalid_bit_widths_and_preserves_noop_state() {
+    let (mut device, _) = fake_device(&ffi_config());
+    let mut pulse = InvertingPulseAction {
+        struct_size: size_of::<InvertingPulseAction>() as u32,
+        abi_version: ABI_VERSION,
+        ptt_invert: 0,
+        gpio_invert_mask: 256,
+        pulse_duration_milliseconds: 0,
+        cancel_pulse: 0,
+    };
+    assert_eq!(
+        device.publish_inverting_pulse(&pulse),
+        GPIO_INVALID_ARGUMENT
+    );
+    pulse.gpio_invert_mask = 0;
+    pulse.cancel_pulse = 2;
+    assert_eq!(
+        device.publish_inverting_pulse(&pulse),
+        GPIO_INVALID_ARGUMENT
+    );
+    pulse.cancel_pulse = 1;
+    pulse.ptt_invert = 1;
+    assert_eq!(
+        device.publish_inverting_pulse(&pulse),
+        GPIO_INVALID_ARGUMENT
+    );
+    pulse.ptt_invert = 0;
+    pulse.gpio_invert_mask = 1;
+    assert_eq!(
+        device.publish_inverting_pulse(&pulse),
+        GPIO_INVALID_ARGUMENT
+    );
+    pulse.gpio_invert_mask = 0;
+    pulse.cancel_pulse = 0;
+    assert_eq!(device.publish_inverting_pulse(&pulse), GPIO_OK);
+    assert_eq!(device.pulse_generation.load(Ordering::Acquire), 0);
+    assert_eq!(
+        device_publish_inverting_pulse(ptr::null_mut(), &pulse),
+        GPIO_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        device_publish_inverting_pulse(&mut device, ptr::null()),
+        GPIO_INVALID_ARGUMENT
+    );
+
+    let mut scheduled = ScheduledInvertingPulseAction {
+        struct_size: size_of::<ScheduledInvertingPulseAction>() as u32,
+        abi_version: ABI_VERSION,
+        ptt_invert: 0,
+        gpio_invert_mask: 256,
+        pulse_duration_milliseconds: 0,
+        ptt_cancel: 0,
+        gpio_cancel_mask: 0,
+    };
+    assert_eq!(
+        device.schedule_inverting_pulse(&scheduled),
+        GPIO_INVALID_ARGUMENT
+    );
+    scheduled.gpio_invert_mask = 0;
+    scheduled.gpio_cancel_mask = 256;
+    assert_eq!(
+        device.schedule_inverting_pulse(&scheduled),
+        GPIO_INVALID_ARGUMENT
+    );
+    scheduled.gpio_cancel_mask = 0;
+    scheduled.pulse_duration_milliseconds = 1;
+    assert_eq!(
+        device.schedule_inverting_pulse(&scheduled),
+        GPIO_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        device_schedule_inverting_pulse(ptr::null_mut(), &scheduled),
+        GPIO_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        device_schedule_inverting_pulse(&mut device, ptr::null()),
+        GPIO_INVALID_ARGUMENT
+    );
+}
+
 /// Verify active-low COR and CTCSS measurements from the same HID report are retained atomically.
 #[test]
 fn service_publishes_active_low_hardware_signaling() {
