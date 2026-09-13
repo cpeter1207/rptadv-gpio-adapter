@@ -1,0 +1,23 @@
+Source: rptadv-gpio-adapter
+Section: libs
+Priority: optional
+Maintainer: Chris Peterson <cpeter1207@users.noreply.github.com>
+Build-Depends: cargo, debhelper-compat (= 13), libusb-1.0-0-dev, pkg-config, rustc
+Standards-Version: 4.7.2
+Homepage: https://github.com/cpeter1207/rptadv-gpio-adapter
+Rules-Requires-Root: no
+
+Package: librptadv-gpio-adapter1
+Architecture: any
+Multi-Arch: same
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: CM119 HID and Linux parallel GPIO adapter for rpt_advanced
+ Versioned dynamic GPIO adapter used by rpt_advanced radio ports.
+
+Package: librptadv-gpio-adapter-dev
+Architecture: any
+Multi-Arch: same
+Depends: ${misc:Depends}, librptadv-gpio-adapter1 (= ${binary:Version})
+Description: development files for the rpt_advanced GPIO adapter
+ Public C header and pkg-config metadata for dynamic consumers of the CM119
+ HID and Linux parallel GPIO adapter.

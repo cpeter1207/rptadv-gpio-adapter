@@ -1,0 +1,8 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: rptadv-gpio-adapter
+Source: https://github.com/cpeter1207/rptadv-gpio-adapter
+
+Files: *
+Copyright: 2026 Chris Peterson
+License: GPL-2.0-only
+ License: GPL-2.0-only
