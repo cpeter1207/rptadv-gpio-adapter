@@ -1,0 +1,3 @@
+usr/include/rptadv_gpio_adapter/rptadv_gpio_adapter.h
+usr/lib/*/librptadv_gpio_adapter.so
+usr/lib/*/pkgconfig/rptadv_gpio_adapter.pc

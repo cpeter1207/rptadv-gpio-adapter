@@ -1,0 +1,10 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=@LIBDIR@
+includedir=${prefix}/include
+
+Name: rptadv_gpio_adapter
+Description: CM119 HID and Linux parallel GPIO adapter for rpt_advanced
+Version: @VERSION@
+Libs: -L${libdir} -lrptadv_gpio_adapter
+Cflags: -I${includedir}/rptadv_gpio_adapter

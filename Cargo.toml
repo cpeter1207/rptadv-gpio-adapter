@@ -1,0 +1,22 @@
+[package]
+name = "rptadv-gpio-adapter"
+version = "0.1.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-2.0-only"
+description = "CM119 HID and Linux parallel GPIO adapter for rpt_advanced"
+repository = "https://github.com/cpeter1207/rptadv-gpio-adapter"
+publish = false
+
+[lib]
+name = "rptadv_gpio_adapter"
+crate-type = ["cdylib"]
+
+[profile.release]
+codegen-units = 1
+debug = 1
+lto = "thin"
+panic = "abort"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
