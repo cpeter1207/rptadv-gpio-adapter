@@ -1,0 +1,13 @@
+/build/
+/.work/
+/target/
+*.gcda
+*.gcno
+*.gcov
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/files
+/debian/librptadv-gpio-adapter1/
+/debian/librptadv-gpio-adapter-dev/
+/debian/tmp/
+/debian/*.substvars
