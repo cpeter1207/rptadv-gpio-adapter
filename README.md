@@ -56,13 +56,17 @@ actions and read snapshots only.
 Append-only ABI-1 descriptor operations retain the established active-low
 four-bit binary channel selector and the RTX two-word serial programming
 protocol. They are serialized control-plane operations, not native-tick
-operations. RTX programming retains the legacy 20-bit most-significant-bit
-order, settling intervals, always-low TX-power bit, and immediate TX-clear
-behavior.
+operations. The released `librptadvsignaling.so.1` owns portable pulse and
+binary/RTX sequencing; this adapter validates its descriptor at setup, owns
+each opaque pulse handle, supplies monotonic elapsed time at service, and
+performs all pin writes and RTX settling delays. RTX programming retains the
+legacy 20-bit most-significant-bit order, settling intervals, always-low
+TX-power bit, and immediate TX-clear behavior.
 
 ## Build
 
-Install `libusb-1.0-0-dev`, Rust, and the ordinary project quality tools, then
+Install `libusb-1.0-0-dev`, released `librptadvsignaling-dev` ABI 1
+(`>= 0.1.0~alpha1-1`), Rust, and the ordinary project quality tools, then
 run:
 
 ```sh
@@ -71,7 +75,9 @@ make test
 ```
 
 The resulting package layout contains only the dynamic shared object, public
-header, and pkg-config metadata.  No static archive is shipped.
+header, and pkg-config metadata. No static archive is shipped. Install the
+matching `librptadvsignaling1` runtime on deployed hosts; the GPIO Debian
+package declares this direct dependency.
 
 ## License
 

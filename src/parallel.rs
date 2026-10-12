@@ -2,18 +2,14 @@
 //!
 //! A service owner performs all ppdev or direct-I/O access.  Native ticks only
 //! publish a prepared output action and copy already-published input and status
-//! snapshots. The adapter also owns the established parallel-port binary
-//! channel and RTX serial programming protocols as bounded control-plane
-//! operations; radio policy still remains above this hardware boundary.
+//! snapshots. Portable binary/RTX sequencing is supplied by signaling;
+//! the adapter alone owns parallel pin writes and settling delays.
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 use super::GPIO_UNSUPPORTED;
-use super::{
-    ABI_VERSION, GPIO_INVALID_ARGUMENT, GPIO_IO_ERROR, GPIO_OK, ScheduledPulseState,
-    TimedPulseState, ffi, publish_scheduled_pulse, publish_timed_pulse,
-};
+use super::{ABI_VERSION, GPIO_INVALID_ARGUMENT, GPIO_IO_ERROR, GPIO_OK, ffi, signaling_client};
 use std::cell::UnsafeCell;
-use std::ffi::{CStr, CString, c_char, c_int, c_ulong};
+use std::ffi::{CStr, CString, c_char, c_int, c_ulong, c_void};
 #[cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64")))]
 use std::fs::{File, OpenOptions};
 use std::mem::size_of;
@@ -32,27 +28,15 @@ pub(crate) const PARALLEL_TRANSPORT_RAW_IO: u32 = 2;
 /// Try the configured ppdev node, then an explicitly configured raw I/O port.
 pub(crate) const PARALLEL_TRANSPORT_AUTO: u32 = 0;
 
-/// Number of serial bits in each established RTX programming register.
-const RTX_REGISTER_BITS: u32 = 20;
 /// Busy-spin iterations in one established RTX hardware-settling interval.
 const RTX_BIT_TIME_ITERATIONS: usize = 100_000;
-/// Parallel data bit used as the RTX serial clock.
-const RTX_CLOCK_MASK: u8 = 0x01;
-/// Parallel data bit carrying the RTX serial value.
-const RTX_DATA_MASK: u8 = 0x02;
-/// Parallel data bit that latches one shifted RTX word.
-const RTX_ENABLE_MASK: u8 = 0x04;
-/// Parallel data bit that keys the RTX transmitter.
-const RTX_TRANSMIT_MASK: u8 = 0x08;
-/// Parallel data bit historically reserved for RTX transmit power and held low.
-const RTX_TRANSMIT_POWER_MASK: u8 = 0x10;
 /// RTX protocol lines reset before every serial word.
-const RTX_CONTROL_MASK: u8 =
-    RTX_CLOCK_MASK | RTX_DATA_MASK | RTX_ENABLE_MASK | RTX_TRANSMIT_MASK | RTX_TRANSMIT_POWER_MASK;
+const RTX_CONTROL_MASK: u8 = 0x1f;
+/// Adapter pin-ownership checks for the RTX transmit controls.
+const RTX_TRANSMIT_MASK: u8 = 0x08;
+const RTX_TRANSMIT_POWER_MASK: u8 = 0x10;
 /// Four active-low binary channel-select bits on the legacy parallel interface.
 const BINARY_CHANNEL_MASK: u8 = 0xf0;
-/// Process-wide settle state retained by the established RTX serial protocol.
-static RTX_SERIAL_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Linux `O_RDWR` flag.  The adapter needs both ppdev status and data access.
 #[cfg(target_os = "linux")]
@@ -98,18 +82,8 @@ pub struct ParallelDevice {
     online: AtomicBool,
     /// Most recent transport error, reset after successful I/O.
     last_io_error: AtomicI32,
-    /// Latest requested pulse mask and duration packed by the tick.
-    pulse_request: AtomicU64,
-    /// Generation paired with @ref pulse_request.
-    pulse_generation: AtomicU64,
-    /// Service-owner-only pulse timing and output state.
-    service_state: UnsafeCell<TimedPulseState>,
-    /// Per-bit durations for independently expiring baseline-XOR pulses.
-    scheduled_pulse_durations: [AtomicU32; u32::BITS as usize],
-    /// Per-bit publication generations for independently scheduled pulse bits.
-    scheduled_pulse_generations: [AtomicU64; u32::BITS as usize],
-    /// Service-owner-only state for independent pulse deadlines.
-    scheduled_service_state: UnsafeCell<ScheduledPulseState>,
+    /// Provider-owned pulse state; adapter supplies elapsed monotonic time.
+    pulse: signaling_client::Pulse,
 }
 
 /// C-compatible selection of one parallel-port transport.
@@ -177,52 +151,6 @@ pub(crate) struct ParallelStats {
     pub(crate) applied_output_mask: u32,
 }
 
-/// The two established RTX serial words for one selected receive or transmit frequency.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RtxWords {
-    /// Reference-divider word shifted before the synthesizer word.
-    reference: u32,
-    /// Synthesizer word for the selected receive or transmit frequency.
-    synthesizer: u32,
-}
-
-/// Calculate the established RTX serial words without performing hardware I/O.
-fn rtx_words(rx_frequency_hz: u32, tx_frequency_hz: u32, transmitting: bool) -> RtxWords {
-    let (reference_frequency_hz, step_frequency_hz, receiver_if_frequency_hz) =
-        if rx_frequency_hz > 200_000_000 {
-            (16_012_500, 12_500, 21_400_000)
-        } else {
-            (16_000_000, 5_000, 10_700_000)
-        };
-    let synthesizer_frequency_hz = if transmitting {
-        tx_frequency_hz
-    } else {
-        rx_frequency_hz.wrapping_sub(receiver_if_frequency_hz)
-    };
-    let word = (synthesizer_frequency_hz / step_frequency_hz).wrapping_shl(1);
-
-    RtxWords {
-        reference: (reference_frequency_hz / step_frequency_hz).wrapping_shl(1) | 1,
-        synthesizer: (word & 0xffff_ff80)
-            .wrapping_shl(1)
-            .wrapping_add(word & 0x7f),
-    }
-}
-
-/// Return the long initial or short subsequent serial-settling delay multiplier.
-fn rtx_initial_delay_multiplier() -> u32 {
-    rtx_initial_delay_multiplier_for(&RTX_SERIAL_INITIALIZED)
-}
-
-/// Return one serial-settling delay multiplier from a supplied protocol state.
-fn rtx_initial_delay_multiplier_for(initialized: &AtomicBool) -> u32 {
-    if initialized.swap(true, Ordering::AcqRel) {
-        4
-    } else {
-        200
-    }
-}
-
 /// Preserve the established RTX busy-spin settling interval outside real-time audio.
 fn rtx_delay(multiplier: u32) {
     for _ in 0..RTX_BIT_TIME_ITERATIONS * multiplier as usize {
@@ -230,44 +158,33 @@ fn rtx_delay(multiplier: u32) {
     }
 }
 
-/// Shift and latch one established 20-bit RTX word, most-significant bit first.
-///
-/// The caller supplies the only hardware-write and delay operations so tests
-/// can prove ordering and settling intent without contacting a parallel port.
-fn rtx_shift_word(
-    output: &mut u8,
-    word: u32,
-    initial_delay_multiplier: u32,
-    write: &mut impl FnMut(u8) -> Result<(), c_int>,
-    delay: &mut impl FnMut(u32),
-) -> Result<(), c_int> {
-    *output &= !RTX_CONTROL_MASK;
-    write(*output)?;
-    delay(initial_delay_multiplier);
+/// Only adapter-owned operations cross the signaling callback boundary.
+struct RtxContext<'a> {
+    device: &'a ParallelDevice,
+    delay: &'a mut dyn FnMut(u32),
+}
 
-    for bit_index in (0..RTX_REGISTER_BITS).rev() {
-        let bit = 1_u32 << bit_index;
-        if word & bit != 0 {
-            *output |= RTX_DATA_MASK;
-        } else {
-            *output &= !RTX_DATA_MASK;
-        }
-        write(*output)?;
-        delay(1);
-        *output |= RTX_CLOCK_MASK;
-        write(*output)?;
-        delay(1);
-        *output &= !RTX_CLOCK_MASK;
-        write(*output)?;
-        delay(1);
-    }
-    *output &= !(RTX_CLOCK_MASK | RTX_DATA_MASK);
-    write(*output)?;
-    *output |= RTX_ENABLE_MASK;
-    write(*output)?;
-    delay(1);
-    *output &= !RTX_ENABLE_MASK;
-    write(*output)
+extern "C" fn write_control_callback(context: *mut c_void, data: u8) -> c_int {
+    // SAFETY: the synchronous provider call receives this live device pointer.
+    let device = unsafe { &*(context as *const ParallelDevice) };
+    device
+        .write_control_byte(data)
+        .map_or_else(|error| error, |()| GPIO_OK)
+}
+
+extern "C" fn write_rtx_callback(context: *mut c_void, data: u8) -> c_int {
+    // SAFETY: the synchronous provider call receives this live stack context.
+    let context = unsafe { &mut *(context as *mut RtxContext<'_>) };
+    context
+        .device
+        .write_control_byte(data)
+        .map_or_else(|error| error, |()| GPIO_OK)
+}
+
+extern "C" fn delay_rtx_callback(context: *mut c_void, multiplier: u32) {
+    // SAFETY: the synchronous provider call receives this live stack context.
+    let context = unsafe { &mut *(context as *mut RtxContext<'_>) };
+    (context.delay)(multiplier);
 }
 
 /// Strictly validated control-plane configuration.
@@ -372,8 +289,9 @@ impl ParallelDevice {
     pub(crate) fn with_transport(
         config: ValidatedParallelConfig,
         transport: Box<dyn ParallelTransport>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, c_int> {
+        let pulse = signaling_client::Pulse::new()?;
+        Ok(Self {
             transport: UnsafeCell::new(transport),
             output_enable_mask: config.output_enable_mask,
             desired_outputs: AtomicU32::new(u32::from(config.output_initial_mask)),
@@ -384,13 +302,8 @@ impl ParallelDevice {
             io_error_count: AtomicU64::new(0),
             online: AtomicBool::new(true),
             last_io_error: AtomicI32::new(0),
-            pulse_request: AtomicU64::new(0),
-            pulse_generation: AtomicU64::new(0),
-            service_state: UnsafeCell::new(TimedPulseState::new()),
-            scheduled_pulse_durations: std::array::from_fn(|_| AtomicU32::new(0)),
-            scheduled_pulse_generations: std::array::from_fn(|_| AtomicU64::new(0)),
-            scheduled_service_state: UnsafeCell::new(ScheduledPulseState::new()),
-        }
+            pulse,
+        })
     }
 
     /// Record a transport result for lock-free observers.
@@ -430,9 +343,7 @@ impl ParallelDevice {
         self.desired_outputs
             .store(u32::from(output), Ordering::Release);
         if action.pulse_duration_milliseconds != 0 || action.cancel_pulse != 0 {
-            publish_timed_pulse(
-                &self.pulse_request,
-                &self.pulse_generation,
+            return self.pulse.publish_timed(
                 u32::from(pulse),
                 action.pulse_duration_milliseconds,
                 false,
@@ -459,9 +370,7 @@ impl ParallelDevice {
             return GPIO_INVALID_ARGUMENT;
         }
         if action.pulse_duration_milliseconds != 0 || action.cancel_pulse != 0 {
-            publish_timed_pulse(
-                &self.pulse_request,
-                &self.pulse_generation,
+            return self.pulse.publish_timed(
                 u32::from(mask),
                 action.pulse_duration_milliseconds,
                 true,
@@ -492,9 +401,7 @@ impl ParallelDevice {
             return GPIO_INVALID_ARGUMENT;
         }
         if schedule != 0 || cancel != 0 {
-            publish_scheduled_pulse(
-                &self.scheduled_pulse_durations,
-                &self.scheduled_pulse_generations,
+            return self.pulse.publish_scheduled(
                 u32::from(schedule),
                 u32::from(cancel),
                 action.pulse_duration_milliseconds,
@@ -547,22 +454,9 @@ impl ParallelDevice {
 
     /// Run one non-real-time parallel service cycle.
     pub(crate) fn service_at(&self, now: Instant) -> c_int {
-        let requested_generation = self.pulse_generation.load(Ordering::Acquire);
-        let requested_pulse = self.pulse_request.load(Ordering::Acquire);
-        // SAFETY: descriptor contract permits one exclusive service owner.
-        let state = unsafe { &mut *self.service_state.get() };
-        state.observe_request(now, requested_generation, requested_pulse);
-        // SAFETY: that same contract reserves scheduled state to that owner.
-        let scheduled_state = unsafe { &mut *self.scheduled_service_state.get() };
-        scheduled_state.observe_requests(
-            now,
-            &self.scheduled_pulse_durations,
-            &self.scheduled_pulse_generations,
-        );
-        let target = scheduled_state.apply_to(
-            state.apply_to(self.desired_outputs.load(Ordering::Acquire), now),
-            now,
-        ) as u8;
+        let target = self
+            .pulse
+            .evaluate(now, self.desired_outputs.load(Ordering::Acquire)) as u8;
         if u32::from(target) != self.flushed_outputs.load(Ordering::Acquire) {
             if self.write_data(target).is_err() {
                 return GPIO_IO_ERROR;
@@ -605,16 +499,12 @@ impl ParallelDevice {
         if !self.supports_output_bits(BINARY_CHANNEL_MASK) {
             return GPIO_INVALID_ARGUMENT;
         }
-        let mut output = self.desired_outputs.load(Ordering::Acquire) as u8;
-        output |= BINARY_CHANNEL_MASK;
-        if self.write_control_byte(output).is_err() {
-            return GPIO_IO_ERROR;
-        }
-        output &= !channel.wrapping_shl(4);
-        if self.write_control_byte(output).is_err() {
-            return GPIO_IO_ERROR;
-        }
-        GPIO_OK
+        (self.pulse.descriptor().set_binary_channel)(
+            self.desired_outputs.load(Ordering::Acquire) as u8,
+            channel,
+            (self as *const Self).cast_mut().cast(),
+            write_control_callback,
+        )
     }
 
     /// Program the established RTX reference and synthesizer registers.
@@ -650,42 +540,20 @@ impl ParallelDevice {
         if !self.supports_output_bits(RTX_CONTROL_MASK) {
             return GPIO_INVALID_ARGUMENT;
         }
-        // The legacy protocol accepts this request but deliberately holds TXPWR low.
-        let _ = high_power;
-        let words = rtx_words(rx_frequency_hz, tx_frequency_hz, transmitting != 0);
-        let mut output = self.desired_outputs.load(Ordering::Acquire) as u8;
-        let mut write = |data| self.write_control_byte(data);
-        if rtx_shift_word(
-            &mut output,
-            words.reference,
-            rtx_initial_delay_multiplier(),
-            &mut write,
+        let mut context = RtxContext {
+            device: self,
             delay,
+        };
+        (self.pulse.descriptor().program_rtx)(
+            self.desired_outputs.load(Ordering::Acquire) as u8,
+            rx_frequency_hz,
+            tx_frequency_hz,
+            transmitting,
+            high_power,
+            (&mut context as *mut RtxContext<'_>).cast(),
+            write_rtx_callback,
+            delay_rtx_callback,
         )
-        .is_err()
-            || rtx_shift_word(
-                &mut output,
-                words.synthesizer,
-                rtx_initial_delay_multiplier(),
-                &mut write,
-                delay,
-            )
-            .is_err()
-        {
-            return GPIO_IO_ERROR;
-        }
-        output &= !(RTX_CLOCK_MASK | RTX_DATA_MASK | RTX_ENABLE_MASK);
-        if transmitting != 0 {
-            output &= !RTX_TRANSMIT_POWER_MASK;
-            output |= RTX_TRANSMIT_MASK;
-        } else {
-            output &= !(RTX_TRANSMIT_MASK | RTX_TRANSMIT_POWER_MASK);
-        }
-        if self.write_control_byte(output).is_ok() {
-            GPIO_OK
-        } else {
-            GPIO_IO_ERROR
-        }
     }
 
     /// Clear only the RTX transmit and retained-low power bits without serial traffic.
@@ -694,12 +562,11 @@ impl ParallelDevice {
         if !self.supports_output_bits(transmit_mask) {
             return GPIO_INVALID_ARGUMENT;
         }
-        let output = self.desired_outputs.load(Ordering::Acquire) as u8 & !transmit_mask;
-        if self.write_control_byte(output).is_ok() {
-            GPIO_OK
-        } else {
-            GPIO_IO_ERROR
-        }
+        (self.pulse.descriptor().clear_rtx_transmit)(
+            self.desired_outputs.load(Ordering::Acquire) as u8,
+            (self as *const Self).cast_mut().cast(),
+            write_control_callback,
+        )
     }
 
     /// Copy the latest status without touching ppdev or raw I/O.
@@ -730,14 +597,8 @@ impl ParallelDevice {
 
     /// Deassert all enabled data pins before releasing the transport.
     pub(crate) fn close(&mut self) {
-        publish_timed_pulse(&self.pulse_request, &self.pulse_generation, 0, 0, false);
-        publish_scheduled_pulse(
-            &self.scheduled_pulse_durations,
-            &self.scheduled_pulse_generations,
-            0,
-            u32::MAX,
-            0,
-        );
+        let _ = self.pulse.publish_timed(0, 0, false);
+        let _ = self.pulse.publish_scheduled(0, u32::MAX, 0);
         let _ = self.write_data(0);
         self.flushed_outputs.store(0, Ordering::Release);
         self.online.store(false, Ordering::Release);
@@ -933,7 +794,10 @@ pub(crate) extern "C" fn parallel_open(
         Ok(transport) => transport,
         Err(error) => return error,
     };
-    let device_value = Box::new(ParallelDevice::with_transport(config, transport));
+    let device_value = match ParallelDevice::with_transport(config, transport) {
+        Ok(device) => Box::new(device),
+        Err(error) => return error,
+    };
     // SAFETY: ownership transfers to the caller until `parallel_close`.
     unsafe { *device = Box::into_raw(device_value) };
     GPIO_OK
@@ -1071,7 +935,6 @@ pub(crate) extern "C" fn parallel_close(device: *mut ParallelDevice) {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -1248,7 +1111,8 @@ mod tests {
             state: Arc::clone(&state),
         };
         (
-            ParallelDevice::with_transport(validated(config), Box::new(transport)),
+            ParallelDevice::with_transport(validated(config), Box::new(transport))
+                .expect("released signaling pulse"),
             state,
         )
     }
@@ -1840,88 +1704,24 @@ mod tests {
         assert_eq!(inputs.online, 0);
     }
 
-    /// Preserve the established RTX frequency-word calculation for both radio bands.
-    #[test]
-    fn rtx_word_calculation_matches_the_legacy_protocol() {
-        assert_eq!(
-            rtx_words(146_940_000, 146_340_000, false),
-            RtxWords {
-                reference: 6_401,
-                synthesizer: 108_896,
-            }
-        );
-        assert_eq!(
-            rtx_words(146_940_000, 146_340_000, true),
-            RtxWords {
-                reference: 6_401,
-                synthesizer: 117_032,
-            }
-        );
-        assert_eq!(
-            rtx_words(444_500_000, 449_500_000, false),
-            RtxWords {
-                reference: 2_563,
-                synthesizer: 135_280,
-            }
-        );
-    }
-
-    /// Keep the first serial transfer's long settle and later transfers' short settle.
-    #[test]
-    fn rtx_settle_state_and_busy_spin_interval_match_the_legacy_protocol() {
-        let initialized = AtomicBool::new(false);
-        assert_eq!(rtx_initial_delay_multiplier_for(&initialized), 200);
-        assert_eq!(rtx_initial_delay_multiplier_for(&initialized), 4);
-        rtx_delay(0);
-        rtx_delay(1);
-    }
-
-    /// Shift each RTX word most-significant-bit first with the established latch timing.
-    #[test]
-    fn rtx_serial_word_preserves_bit_order_and_settling_intervals() {
-        let word = 0x5_4321;
-        let mut output = 0xe0;
-        let mut writes = Vec::new();
-        let mut delays = Vec::new();
-        let mut write = |data| {
-            writes.push(data);
-            Ok(())
-        };
-        let mut delay = |multiplier| delays.push(multiplier);
-
-        assert_eq!(
-            rtx_shift_word(&mut output, word, 200, &mut write, &mut delay),
-            Ok(())
-        );
-        assert_eq!(writes.len(), 64);
-        assert_eq!(delays.len(), 62);
-        assert_eq!(delays[0], 200);
-        assert!(delays[1..].iter().all(|&multiplier| multiplier == 1));
-        assert_eq!(writes[0], 0xe0);
-        for (index, bit_index) in (0..RTX_REGISTER_BITS).rev().enumerate() {
-            let data = if word & (1_u32 << bit_index) != 0 {
-                0xe2
-            } else {
-                0xe0
-            };
-            let offset = 1 + index * 3;
-            assert_eq!(writes[offset], data);
-            assert_eq!(writes[offset + 1], data | RTX_CLOCK_MASK);
-            assert_eq!(writes[offset + 2], data);
-        }
-        assert_eq!(&writes[61..], &[0xe0, 0xe4, 0xe0]);
-        assert_eq!(output, 0xe0);
-
-        let mut output = 0;
-        let mut write = |_| Err(-91);
-        let mut delay = |_| panic!("failed writes cannot advance serial timing");
-        assert_eq!(
-            rtx_shift_word(&mut output, word, 4, &mut write, &mut delay),
-            Err(-91)
-        );
-    }
-
     /// Preserve active-low channel selection, RTX transmit polarity, and immediate TX clear.
+    fn expected_rtx_writes(initial: u8, words: [u32; 2], transmit: bool) -> Vec<u8> {
+        let mut writes = Vec::with_capacity(129);
+        let mut output = initial;
+        for word in words {
+            output &= !0x1f;
+            writes.push(output);
+            for bit in (0..20).rev() {
+                output = (output & !0x02) | (((word >> bit) as u8 & 1) << 1);
+                writes.extend([output, output | 0x01, output]);
+            }
+            writes.extend([output & !0x03, (output & !0x03) | 0x04, output & !0x03]);
+            output &= !0x03;
+        }
+        writes.push((output & !0x18) | if transmit { 0x08 } else { 0 });
+        writes
+    }
+
     #[test]
     fn legacy_binary_and_rtx_operations_preserve_parallel_output_behavior() {
         let config = protocol_config(0x0f);
@@ -1934,28 +1734,46 @@ mod tests {
 
         let config = protocol_config(0xe0);
         let (device, state) = fake_device(&config);
-        let mut delay = |_| {};
+        let mut delays = Vec::new();
+        let mut delay = |multiplier| delays.push(multiplier);
         assert_eq!(
             device.program_rtx_with_delay(146_940_000, 146_340_000, 1, 1, &mut delay),
             GPIO_OK
         );
         let state = state.lock().expect("fake transport state");
         let writes = &state.writes;
-        assert_eq!(writes.len(), 129);
-        assert_eq!(writes[0], 0xe0);
-        assert_eq!(writes[128], 0xe8);
+        assert_eq!(writes, &expected_rtx_writes(0xe0, [6_401, 117_032], true));
+        assert_eq!(delays.len(), 124);
+        assert!(matches!(delays[0], 4 | 200));
+        assert_eq!(delays[62], 4);
+        assert!(
+            delays
+                .iter()
+                .enumerate()
+                .all(|(i, &value)| i == 0 || i == 62 || value == 1)
+        );
         drop(state);
 
         let config = protocol_config(0xff);
         let (device, state) = fake_device(&config);
-        let mut delay = |_| {};
+        let mut delays = Vec::new();
+        let mut delay = |multiplier| delays.push(multiplier);
         assert_eq!(
             device.program_rtx_with_delay(444_500_000, 449_500_000, 0, 1, &mut delay),
             GPIO_OK
         );
         assert_eq!(
-            state.lock().expect("fake transport state").writes[128] & 0x18,
-            0
+            state.lock().expect("fake transport state").writes,
+            expected_rtx_writes(0xff, [2_563, 135_280], false)
+        );
+        assert_eq!(delays.len(), 124);
+        assert_eq!(delays[0], 4);
+        assert_eq!(delays[62], 4);
+        assert!(
+            delays
+                .iter()
+                .enumerate()
+                .all(|(i, &value)| i == 0 || i == 62 || value == 1)
         );
 
         let config = protocol_config(0xff);
@@ -2038,7 +1856,7 @@ mod tests {
         pulse.cancel_pulse = 0;
         pulse.invert_mask = 0;
         assert_eq!(device.publish_inverting_pulse(&pulse), GPIO_OK);
-        assert_eq!(device.pulse_generation.load(Ordering::Acquire), 0);
+        assert_eq!(device.pulse.evaluate(Instant::now(), 0), 0);
         assert_eq!(
             parallel_publish_inverting_pulse(ptr::null_mut(), &pulse),
             GPIO_INVALID_ARGUMENT
