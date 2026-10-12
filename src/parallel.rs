@@ -290,8 +290,7 @@ impl ParallelDevice {
         config: ValidatedParallelConfig,
         transport: Box<dyn ParallelTransport>,
     ) -> Result<Self, c_int> {
-        let pulse = signaling_client::Pulse::new()?;
-        Ok(Self {
+        signaling_client::Pulse::new().map(|pulse| Self {
             transport: UnsafeCell::new(transport),
             output_enable_mask: config.output_enable_mask,
             desired_outputs: AtomicU32::new(u32::from(config.output_initial_mask)),
@@ -794,13 +793,22 @@ pub(crate) extern "C" fn parallel_open(
         Ok(transport) => transport,
         Err(error) => return error,
     };
-    let device_value = match ParallelDevice::with_transport(config, transport) {
-        Ok(device) => Box::new(device),
-        Err(error) => return error,
-    };
-    // SAFETY: ownership transfers to the caller until `parallel_close`.
-    unsafe { *device = Box::into_raw(device_value) };
-    GPIO_OK
+    finish_parallel_open(device, ParallelDevice::with_transport(config, transport))
+}
+
+/// Transfer a fully constructed handle, preserving null output on setup failure.
+fn finish_parallel_open(
+    out: *mut *mut ParallelDevice,
+    result: Result<ParallelDevice, c_int>,
+) -> c_int {
+    match result {
+        Ok(handle) => {
+            // SAFETY: `parallel_open` checked writable output storage before calling this helper.
+            unsafe { *out = Box::into_raw(Box::new(handle)) };
+            GPIO_OK
+        }
+        Err(error) => error,
+    }
 }
 
 /// Publish one parallel-port output action without touching host I/O.
@@ -1115,6 +1123,13 @@ mod tests {
                 .expect("released signaling pulse"),
             state,
         )
+    }
+
+    #[test]
+    fn signaling_setup_failure_keeps_parallel_handle_null() {
+        let mut out = ptr::null_mut();
+        assert_eq!(finish_parallel_open(&mut out, Err(-7)), -7);
+        assert!(out.is_null());
     }
 
     /// Install a successful ppdev backend with a nonzero synthetic descriptor.
@@ -1705,22 +1720,32 @@ mod tests {
     }
 
     /// Preserve active-low channel selection, RTX transmit polarity, and immediate TX clear.
-    fn expected_rtx_writes(initial: u8, words: [u32; 2], transmit: bool) -> Vec<u8> {
-        let mut writes = Vec::with_capacity(129);
-        let mut output = initial;
-        for word in words {
-            output &= !0x1f;
-            writes.push(output);
-            for bit in (0..20).rev() {
-                output = (output & !0x02) | (((word >> bit) as u8 & 1) << 1);
-                writes.extend([output, output | 0x01, output]);
-            }
-            writes.extend([output & !0x03, (output & !0x03) | 0x04, output & !0x03]);
-            output &= !0x03;
-        }
-        writes.push((output & !0x18) | if transmit { 0x08 } else { 0 });
-        writes
+    fn decoded_trace(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len(), 258);
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII trace"), 16)
+                    .expect("trace byte")
+            })
+            .collect()
     }
+
+    // Literal 129-byte control-write baselines from the pinned pre-extraction protocol.
+    const VHF_TX_TRACE: &str = concat!(
+        "e0e0e1e0e0e1e0e0e1e0e0e1e0e0e1e0e0e1e0e0e1e0e2e3e2e2e3e2e0e1e0e0",
+        "e1e0e2e3e2e0e1e0e0e1e0e0e1e0e0e1e0e0e1e0e0e1e0e0e1e0e2e3e2e0e4e0",
+        "e0e0e1e0e0e1e0e0e1e0e2e3e2e2e3e2e2e3e2e0e1e0e0e1e0e2e3e2e0e1e0e0",
+        "e1e0e2e3e2e0e1e0e0e1e0e2e3e2e0e1e0e2e3e2e0e1e0e0e1e0e0e1e0e0e4e0",
+        "e8"
+    );
+    const UHF_RX_TRACE: &str = concat!(
+        "e0e0e1e0e0e1e0e0e1e0e0e1e0e0e1e0e0e1e0e0e1e0e0e1e0e2e3e2e0e1e0e2",
+        "e3e2e0e1e0e0e1e0e0e1e0e0e1e0e0e1e0e0e1e0e0e1e0e2e3e2e2e3e2e0e4e0",
+        "e0e0e1e0e0e1e0e2e3e2e0e1e0e0e1e0e0e1e0e0e1e0e2e3e2e0e1e0e0e1e0e0",
+        "e1e0e0e1e0e0e1e0e2e3e2e2e3e2e2e3e2e0e1e0e0e1e0e0e1e0e0e1e0e0e4e0",
+        "e0"
+    );
 
     #[test]
     fn legacy_binary_and_rtx_operations_preserve_parallel_output_behavior() {
@@ -1742,7 +1767,7 @@ mod tests {
         );
         let state = state.lock().expect("fake transport state");
         let writes = &state.writes;
-        assert_eq!(writes, &expected_rtx_writes(0xe0, [6_401, 117_032], true));
+        assert_eq!(writes, &decoded_trace(VHF_TX_TRACE));
         assert_eq!(delays.len(), 124);
         assert!(matches!(delays[0], 4 | 200));
         assert_eq!(delays[62], 4);
@@ -1764,7 +1789,7 @@ mod tests {
         );
         assert_eq!(
             state.lock().expect("fake transport state").writes,
-            expected_rtx_writes(0xff, [2_563, 135_280], false)
+            decoded_trace(UHF_RX_TRACE)
         );
         assert_eq!(delays.len(), 124);
         assert_eq!(delays[0], 4);

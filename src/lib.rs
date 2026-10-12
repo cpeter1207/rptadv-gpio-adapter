@@ -540,8 +540,7 @@ impl GpioDevice {
         transport: Box<dyn HidTransport>,
         product_id: u16,
     ) -> Result<Self, c_int> {
-        let pulse = signaling_client::Pulse::new()?;
-        Ok(Self {
+        signaling_client::Pulse::new().map(|pulse| Self {
             transport: UnsafeCell::new(transport),
             profile: config.profile,
             cm108ah_hook_gpio2: product_id == CM108AH_PRODUCT_ID,
@@ -1306,18 +1305,24 @@ extern "C" fn device_open(config: *const DeviceConfig, device: *mut *mut GpioDev
         return GPIO_INVALID_ARGUMENT;
     };
     match LibusbHid::open(&config) {
-        Ok(opened) => {
-            let handle =
-                match GpioDevice::with_transport(config, opened.transport, opened.product_id) {
-                    Ok(handle) => Box::new(handle),
-                    Err(error) => return error,
-                };
-            // SAFETY: caller owns output storage and the Box pointer remains valid until close.
-            unsafe { *device = Box::into_raw(handle) };
-            GPIO_OK
-        }
+        Ok(opened) => finish_device_open(
+            device,
+            GpioDevice::with_transport(config, opened.transport, opened.product_id),
+        ),
         Err(OpenError::Unsupported) => GPIO_UNSUPPORTED,
         Err(OpenError::Usb(_error)) => GPIO_USB_ERROR,
+    }
+}
+
+/// Transfer a fully constructed handle, preserving null output on setup failure.
+fn finish_device_open(out: *mut *mut GpioDevice, result: Result<GpioDevice, c_int>) -> c_int {
+    match result {
+        Ok(handle) => {
+            // SAFETY: `device_open` checked writable output storage before calling this helper.
+            unsafe { *out = Box::into_raw(Box::new(handle)) };
+            GPIO_OK
+        }
+        Err(error) => error,
     }
 }
 

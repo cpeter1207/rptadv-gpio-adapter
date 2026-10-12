@@ -77,7 +77,9 @@ make test
 The resulting package layout contains only the dynamic shared object, public
 header, and pkg-config metadata. No static archive is shipped. Install the
 matching `librptadvsignaling1` runtime on deployed hosts; the GPIO Debian
-package declares this direct dependency.
+package declares this direct dependency. The quality image fetches the exact
+`0.1.0~alpha1-1` provider runtime and development packages through the signed
+USBRadioPlus APT index and verifies the archive signing key fingerprint.
 
 ## License
 

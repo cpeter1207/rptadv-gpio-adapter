@@ -149,6 +149,13 @@ fn fake_device_failing_on_write(
     )
 }
 
+#[test]
+fn signaling_setup_failure_keeps_cm119_handle_null() {
+    let mut out = ptr::null_mut();
+    assert_eq!(finish_device_open(&mut out, Err(-7)), -7);
+    assert!(out.is_null());
+}
+
 /// Mutable observations from one deterministic in-memory libusb backend.
 #[derive(Default)]
 struct FakeLibusbState {
