@@ -13,7 +13,7 @@ PYTHON ?= python3
 
 PACKAGE := rptadv-gpio-adapter
 CRATE := rptadv_gpio_adapter
-PACKAGE_VERSION ?= 0.1.0-alpha.2
+PACKAGE_VERSION ?= 0.1.0-alpha.3
 SOVERSION := 1
 PREFIX ?= /usr/local
 DESTDIR ?=
@@ -133,6 +133,7 @@ install-check: all
 	test ! -e build/stage/usr/lib/$(LIBRARY_BASENAME).a
 	$(READELF) -d build/stage/usr/lib/$(notdir $(LIBRARY_VERSIONED)) | grep -F '$(LIBRARY_BASENAME).so.$(SOVERSION)'
 	$(READELF) -d build/stage/usr/lib/$(notdir $(LIBRARY_VERSIONED)) | grep -F 'libusb-1.0.so'
+	$(READELF) -d build/stage/usr/lib/$(notdir $(LIBRARY_VERSIONED)) | grep -F 'librptadvsignaling.so.1'
 	! $(READELF) -d build/stage/usr/lib/$(notdir $(LIBRARY_VERSIONED)) | grep -E 'res_usbradio.so|libportaudio.so|libasound.so|libhamlib.so'
 	test -f build/stage/usr/include/rptadv_gpio_adapter/$(notdir $(HEADER))
 	test -f build/stage/usr/lib/pkgconfig/rptadv_gpio_adapter.pc
@@ -160,6 +161,9 @@ debian-package-check: dist
 	test -L "$(DEBIAN_STAGE)/usr/lib/$(DEBIAN_MULTIARCH)/$(LIBRARY_BASENAME).so"
 	$(READELF) -d "$(DEBIAN_STAGE)/usr/lib/$(DEBIAN_MULTIARCH)/$(LIBRARY_BASENAME).so.$(SOVERSION)" | grep -F '$(LIBRARY_BASENAME).so.$(SOVERSION)'
 	$(READELF) -d "$(DEBIAN_STAGE)/usr/lib/$(DEBIAN_MULTIARCH)/$(LIBRARY_BASENAME).so.$(SOVERSION)" | grep -F 'libusb-1.0.so'
+	$(READELF) -d "$(DEBIAN_STAGE)/usr/lib/$(DEBIAN_MULTIARCH)/$(LIBRARY_BASENAME).so.$(SOVERSION)" | grep -F 'librptadvsignaling.so.1'
+	dpkg-deb -f "$(DEBIAN_RUNTIME_DEB)" Depends | grep -F 'librptadvsignaling1 (>= 0.1.0~alpha1-1)'
+	dpkg-deb -f "$(DEBIAN_DEV_DEB)" Depends | grep -F 'librptadvsignaling-dev (>= 0.1.0~alpha1-1)'
 	! $(READELF) -d "$(DEBIAN_STAGE)/usr/lib/$(DEBIAN_MULTIARCH)/$(LIBRARY_BASENAME).so.$(SOVERSION)" | grep -E 'res_usbradio.so|libportaudio.so|libasound.so|libhamlib.so'
 
 dist: | build

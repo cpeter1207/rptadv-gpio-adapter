@@ -8,6 +8,7 @@
 
 mod ffi;
 mod parallel;
+mod signaling_client;
 
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
@@ -67,12 +68,6 @@ const EEPROM_MAGIC: u16 = 34329;
 const EEPROM_CHECKSUM_WORD: usize = 63;
 /// A flushed-output sentinel that cannot be formed by `pack_output`.
 const UNFLUSHED_OUTPUT: u32 = u32::MAX;
-/// Reserved low-word bit marking a timed pulse that XORs its baseline.
-///
-/// CM119 and parallel output masks never use this bit, so one shared packed
-/// request can preserve the established active-high parallel pulse behavior
-/// and provide the legacy XOR pulse behavior used by CM119 GPIO.
-const TIMED_PULSE_INVERT_BASELINE_BIT: u32 = 1 << 31;
 /// Stable capability identifier exposed by the descriptor.
 const CAPABILITY_NAME: &[u8] = b"rptadv.cm119-hid-gpio\0";
 
@@ -83,172 +78,6 @@ const GPIO_USB_ERROR: c_int = -3;
 const GPIO_UNSUPPORTED: c_int = -4;
 /// Result returned when an optional parallel-port transport fails after opening.
 const GPIO_IO_ERROR: c_int = -5;
-
-/// Service-owner state for one lock-free timed output pulse.
-///
-/// Publishers store a packed request and advance its generation without I/O.
-/// Only the configured non-real-time service owner mutates this state and
-/// converts the request into an output value at a monotonic deadline.
-struct TimedPulseState {
-    /// Last pulse request observed by the service owner.
-    observed_generation: u64,
-    /// Output bits active for the current pulse.
-    active_pulse_mask: u32,
-    /// Whether the active mask XORs rather than ORs its persistent baseline.
-    pulse_inverts_baseline: bool,
-    /// Monotonic expiry for the active pulse, if any.
-    pulse_deadline: Option<Instant>,
-}
-
-/// Service-owner state for independently timed baseline-XOR output bits.
-///
-/// One published request can replace or cancel selected per-bit deadlines.
-/// The bounded fixed array keeps the service path allocation-free and lets
-/// independent legacy GPIO/parallel pulses overlap without sharing one timer.
-struct ScheduledPulseState {
-    /// Last observed publication generation for each independently scheduled bit.
-    observed_generations: [u64; u32::BITS as usize],
-    /// Per-bit monotonic deadlines; `None` means no scheduled inversion.
-    deadlines: [Option<Instant>; u32::BITS as usize],
-}
-
-impl ScheduledPulseState {
-    /// Construct an idle per-bit schedule.
-    fn new() -> Self {
-        Self {
-            observed_generations: [0; u32::BITS as usize],
-            deadlines: [None; u32::BITS as usize],
-        }
-    }
-
-    /// Apply each independently published schedule or cancellation once.
-    ///
-    /// Per-bit generations retain separate pin requests that arrive before one
-    /// service cycle. A later publication for the same bit deliberately wins.
-    fn observe_requests(
-        &mut self,
-        now: Instant,
-        durations: &[AtomicU32; u32::BITS as usize],
-        generations: &[AtomicU64; u32::BITS as usize],
-    ) {
-        for bit in 0..u32::BITS as usize {
-            let generation = generations[bit].load(Ordering::Acquire);
-            if generation != self.observed_generations[bit] {
-                self.observed_generations[bit] = generation;
-                let duration_milliseconds = durations[bit].load(Ordering::Acquire);
-                self.deadlines[bit] = (duration_milliseconds != 0)
-                    .then(|| now + Duration::from_millis(u64::from(duration_milliseconds)));
-            }
-        }
-    }
-
-    /// XOR all independently scheduled live bits into one current baseline.
-    fn apply_to(&mut self, baseline: u32, now: Instant) -> u32 {
-        let mut active_mask = 0_u32;
-        for bit in 0..u32::BITS as usize {
-            let bit_mask = 1_u32 << bit;
-            if self.deadlines[bit].is_some_and(|deadline| now >= deadline) {
-                self.deadlines[bit] = None;
-            }
-            if self.deadlines[bit].is_some() {
-                active_mask |= bit_mask;
-            }
-        }
-        baseline ^ active_mask
-    }
-}
-
-impl TimedPulseState {
-    /// Construct an idle service-owner pulse state.
-    const fn new() -> Self {
-        Self {
-            observed_generation: 0,
-            active_pulse_mask: 0,
-            pulse_inverts_baseline: false,
-            pulse_deadline: None,
-        }
-    }
-
-    /// Observe the newest packed request at the service boundary.
-    fn observe_request(&mut self, now: Instant, generation: u64, request: u64) {
-        if generation == self.observed_generation {
-            return;
-        }
-        self.observed_generation = generation;
-        let request_bits = request as u32;
-        let duration_milliseconds = (request >> 32) as u32;
-        if duration_milliseconds == 0 {
-            self.active_pulse_mask = 0;
-            self.pulse_inverts_baseline = false;
-            self.pulse_deadline = None;
-            return;
-        }
-        self.active_pulse_mask = request_bits & !TIMED_PULSE_INVERT_BASELINE_BIT;
-        self.pulse_inverts_baseline = request_bits & TIMED_PULSE_INVERT_BASELINE_BIT != 0;
-        self.pulse_deadline = Some(now + Duration::from_millis(u64::from(duration_milliseconds)));
-    }
-
-    /// Return the output value after expiring and applying a current pulse.
-    fn apply_to(&mut self, baseline: u32, now: Instant) -> u32 {
-        if self.pulse_deadline.is_some_and(|deadline| now >= deadline) {
-            self.active_pulse_mask = 0;
-            self.pulse_inverts_baseline = false;
-            self.pulse_deadline = None;
-        }
-        if self.pulse_inverts_baseline {
-            baseline ^ self.active_pulse_mask
-        } else {
-            baseline | self.active_pulse_mask
-        }
-    }
-}
-
-/// Publish one packed timed pulse without performing transport I/O.
-///
-/// The release stores form a generation/request pair for the single service
-/// owner.  Callers validate their mask before using this helper.
-fn publish_timed_pulse(
-    pulse_request: &AtomicU64,
-    pulse_generation: &AtomicU64,
-    mask: u32,
-    duration_milliseconds: u32,
-    invert_baseline: bool,
-) {
-    debug_assert_eq!(mask & TIMED_PULSE_INVERT_BASELINE_BIT, 0);
-    let request = (u64::from(duration_milliseconds) << 32)
-        | u64::from(mask)
-        | (u64::from(invert_baseline) * u64::from(TIMED_PULSE_INVERT_BASELINE_BIT));
-    pulse_request.store(request, Ordering::Release);
-    pulse_generation.fetch_add(1, Ordering::Release);
-}
-
-/// Publish selected independent deadlines without performing transport I/O.
-///
-/// Each selected pin receives its own publication generation, preserving
-/// disjoint requests made before the next service cycle. Callers validate
-/// output masks before this helper.
-fn publish_scheduled_pulse(
-    durations: &[AtomicU32; u32::BITS as usize],
-    generations: &[AtomicU64; u32::BITS as usize],
-    schedule: u32,
-    cancel: u32,
-    duration: u32,
-) {
-    for bit in 0..u32::BITS as usize {
-        let bit_mask = 1_u32 << bit;
-        if schedule & bit_mask != 0 || cancel & bit_mask != 0 {
-            durations[bit].store(
-                if schedule & bit_mask != 0 {
-                    duration
-                } else {
-                    0
-                },
-                Ordering::Release,
-            );
-            generations[bit].fetch_add(1, Ordering::Release);
-        }
-    }
-}
 
 /// Opaque device handle exposed through the C ABI.
 #[repr(C)]
@@ -267,18 +96,8 @@ pub struct GpioDevice {
     desired_outputs: AtomicU32,
     /// Latest state successfully sent by the service owner.
     flushed_outputs: AtomicU32,
-    /// Latest timed XOR pulse request published without HID I/O.
-    pulse_request: AtomicU64,
-    /// Generation paired with @ref pulse_request.
-    pulse_generation: AtomicU64,
-    /// Service-owner-only pulse timing and effective-output state.
-    service_state: UnsafeCell<TimedPulseState>,
-    /// Per-bit durations for independently expiring baseline-XOR pulses.
-    scheduled_pulse_durations: [AtomicU32; u32::BITS as usize],
-    /// Per-bit publication generations for independently scheduled pulse bits.
-    scheduled_pulse_generations: [AtomicU64; u32::BITS as usize],
-    /// Service-owner-only state for independent pulse deadlines.
-    scheduled_service_state: UnsafeCell<ScheduledPulseState>,
+    /// Provider-owned pulse state; the adapter supplies monotonic elapsed time.
+    pulse: signaling_client::Pulse,
     /// Latest lock-free decoded COR, CTCSS, and GPIO input state.
     input_state: AtomicU32,
     /// Complete latest raw HID input report represented as little-endian bytes.
@@ -720,8 +539,8 @@ impl GpioDevice {
         config: ValidatedConfig,
         transport: Box<dyn HidTransport>,
         product_id: u16,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, c_int> {
+        signaling_client::Pulse::new().map(|pulse| Self {
             transport: UnsafeCell::new(transport),
             profile: config.profile,
             cm108ah_hook_gpio2: product_id == CM108AH_PRODUCT_ID,
@@ -729,12 +548,7 @@ impl GpioDevice {
             ptt_inverted: config.ptt_inverted,
             desired_outputs: AtomicU32::new(pack_output(false, config.gpio_output_initial_mask)),
             flushed_outputs: AtomicU32::new(UNFLUSHED_OUTPUT),
-            pulse_request: AtomicU64::new(0),
-            pulse_generation: AtomicU64::new(0),
-            service_state: UnsafeCell::new(TimedPulseState::new()),
-            scheduled_pulse_durations: std::array::from_fn(|_| AtomicU32::new(0)),
-            scheduled_pulse_generations: std::array::from_fn(|_| AtomicU64::new(0)),
-            scheduled_service_state: UnsafeCell::new(ScheduledPulseState::new()),
+            pulse,
             input_state: AtomicU32::new(0),
             input_report: AtomicU32::new(0),
             input_read_count: AtomicU64::new(0),
@@ -745,7 +559,7 @@ impl GpioDevice {
             last_usb_error: AtomicI32::new(0),
             eeprom_read_count: AtomicU64::new(0),
             eeprom_write_count: AtomicU64::new(0),
-        }
+        })
     }
 
     /// Remember one failed HID operation for lock-free observers.
@@ -806,9 +620,7 @@ impl GpioDevice {
             return GPIO_INVALID_ARGUMENT;
         }
         if action.pulse_duration_milliseconds != 0 || action.cancel_pulse != 0 {
-            publish_timed_pulse(
-                &self.pulse_request,
-                &self.pulse_generation,
+            return self.pulse.publish_timed(
                 pack_output(action.ptt_invert != 0, gpio),
                 action.pulse_duration_milliseconds,
                 true,
@@ -842,9 +654,7 @@ impl GpioDevice {
             return GPIO_INVALID_ARGUMENT;
         }
         if schedule != 0 || cancel != 0 {
-            publish_scheduled_pulse(
-                &self.scheduled_pulse_durations,
-                &self.scheduled_pulse_generations,
+            return self.pulse.publish_scheduled(
                 schedule,
                 cancel,
                 action.pulse_duration_milliseconds,
@@ -889,22 +699,9 @@ impl GpioDevice {
 
     /// Flush the effective logical PTT and GPIO output when it changed.
     fn flush_outputs_at(&self, now: Instant) -> Result<(), c_int> {
-        let requested_generation = self.pulse_generation.load(Ordering::Acquire);
-        let requested_pulse = self.pulse_request.load(Ordering::Acquire);
-        // SAFETY: the descriptor contract reserves timed state to one service owner.
-        let state = unsafe { &mut *self.service_state.get() };
-        state.observe_request(now, requested_generation, requested_pulse);
-        // SAFETY: the same descriptor contract reserves scheduled state to that owner.
-        let scheduled_state = unsafe { &mut *self.scheduled_service_state.get() };
-        scheduled_state.observe_requests(
-            now,
-            &self.scheduled_pulse_durations,
-            &self.scheduled_pulse_generations,
-        );
-        let desired = scheduled_state.apply_to(
-            state.apply_to(self.desired_outputs.load(Ordering::Acquire), now),
-            now,
-        );
+        let desired = self
+            .pulse
+            .evaluate(now, self.desired_outputs.load(Ordering::Acquire));
         if desired == self.flushed_outputs.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -1056,14 +853,8 @@ impl GpioDevice {
 
     /// Best-effort physical unkey before the exclusive transport is released.
     fn close(&mut self) {
-        publish_timed_pulse(&self.pulse_request, &self.pulse_generation, 0, 0, false);
-        publish_scheduled_pulse(
-            &self.scheduled_pulse_durations,
-            &self.scheduled_pulse_generations,
-            0,
-            u32::MAX,
-            0,
-        );
+        let _ = self.pulse.publish_timed(0, 0, false);
+        let _ = self.pulse.publish_scheduled(0, u32::MAX, 0);
         self.desired_outputs.store(
             pack_output(
                 false,
@@ -1514,18 +1305,24 @@ extern "C" fn device_open(config: *const DeviceConfig, device: *mut *mut GpioDev
         return GPIO_INVALID_ARGUMENT;
     };
     match LibusbHid::open(&config) {
-        Ok(opened) => {
-            let handle = Box::new(GpioDevice::with_transport(
-                config,
-                opened.transport,
-                opened.product_id,
-            ));
-            // SAFETY: caller owns output storage and the Box pointer remains valid until close.
-            unsafe { *device = Box::into_raw(handle) };
-            GPIO_OK
-        }
+        Ok(opened) => finish_device_open(
+            device,
+            GpioDevice::with_transport(config, opened.transport, opened.product_id),
+        ),
         Err(OpenError::Unsupported) => GPIO_UNSUPPORTED,
         Err(OpenError::Usb(_error)) => GPIO_USB_ERROR,
+    }
+}
+
+/// Transfer a fully constructed handle, preserving null output on setup failure.
+fn finish_device_open(out: *mut *mut GpioDevice, result: Result<GpioDevice, c_int>) -> c_int {
+    match result {
+        Ok(handle) => {
+            // SAFETY: `device_open` checked writable output storage before calling this helper.
+            unsafe { *out = Box::into_raw(Box::new(handle)) };
+            GPIO_OK
+        }
+        Err(error) => error,
     }
 }
 

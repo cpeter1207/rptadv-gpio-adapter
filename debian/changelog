@@ -1,3 +1,9 @@
+rptadv-gpio-adapter (0.1.0~alpha3-1) unstable; urgency=medium
+
+  * Consume the released signaling ABI 1 for GPIO pulses and parallel protocols.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Mon, 12 Oct 2026 13:00:00 -0500
+
 rptadv-gpio-adapter (0.1.0~alpha2-1) unstable; urgency=medium
 
   * Release 0.1.0-alpha.2.

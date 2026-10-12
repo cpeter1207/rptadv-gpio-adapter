@@ -125,7 +125,8 @@ fn fake_device_with_product(
         next_write_error: None,
     };
     (
-        GpioDevice::with_transport(validated(config), Box::new(transport), product_id),
+        GpioDevice::with_transport(validated(config), Box::new(transport), product_id)
+            .expect("released signaling pulse"),
         state,
     )
 }
@@ -142,9 +143,17 @@ fn fake_device_failing_on_write(
         write_count: 0,
     };
     (
-        GpioDevice::with_transport(validated(config), Box::new(transport), 0x0008),
+        GpioDevice::with_transport(validated(config), Box::new(transport), 0x0008)
+            .expect("released signaling pulse"),
         state,
     )
+}
+
+#[test]
+fn signaling_setup_failure_keeps_cm119_handle_null() {
+    let mut out = ptr::null_mut();
+    assert_eq!(finish_device_open(&mut out, Err(-7)), -7);
+    assert!(out.is_null());
 }
 
 /// Mutable observations from one deterministic in-memory libusb backend.
@@ -1057,7 +1066,7 @@ fn cm119_pulse_rejects_invalid_bit_widths_and_preserves_noop_state() {
     pulse.gpio_invert_mask = 0;
     pulse.cancel_pulse = 0;
     assert_eq!(device.publish_inverting_pulse(&pulse), GPIO_OK);
-    assert_eq!(device.pulse_generation.load(Ordering::Acquire), 0);
+    assert_eq!(device.pulse.evaluate(Instant::now(), 0), 0);
     assert_eq!(
         device_publish_inverting_pulse(ptr::null_mut(), &pulse),
         GPIO_INVALID_ARGUMENT
@@ -1194,7 +1203,8 @@ fn service_reports_transport_failures_and_recovers_on_the_next_service() {
         state: Arc::clone(&state),
         next_write_error: Some(-71),
     };
-    let device = GpioDevice::with_transport(validated(&config), Box::new(transport), 0x0008);
+    let device = GpioDevice::with_transport(validated(&config), Box::new(transport), 0x0008)
+        .expect("released signaling pulse");
     assert_eq!(device.service(), GPIO_USB_ERROR);
     assert_eq!(device.service(), GPIO_OK);
     state
@@ -1361,7 +1371,8 @@ fn eeprom_failure_does_not_leave_control_traffic_on_the_gpio_pins() {
         state: Arc::clone(&state),
         next_write_error: Some(-71),
     };
-    let device = GpioDevice::with_transport(validated(&config), Box::new(transport), 0x0008);
+    let device = GpioDevice::with_transport(validated(&config), Box::new(transport), 0x0008)
+        .expect("released signaling pulse");
     let mut image = eeprom_image(ABI_VERSION);
     assert_eq!(device.write_eeprom(&mut image), GPIO_USB_ERROR);
     assert_eq!(

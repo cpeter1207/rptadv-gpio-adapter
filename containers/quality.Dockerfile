@@ -41,6 +41,25 @@ RUN rustup toolchain install "${RUST_STABLE}" --profile minimal --component clip
 	cargo +"${RUST_NIGHTLY}" install cargo-llvm-cov --version "${CARGO_LLVM_COV_VERSION}" --locked && \
 	cargo +"${RUST_NIGHTLY}" llvm-cov --version
 
+# Resolve the released signaling ABI only through the signed public index.
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gnupg && \
+	curl -fL --proto '=https' --tlsv1.2 \
+		https://cpeter1207.github.io/USBRadioPlus/usbradioplus-archive-keyring.gpg \
+		-o /tmp/usbradioplus-archive-keyring.gpg && \
+	fingerprint=$(gpg --batch --quiet --show-keys --with-colons \
+		/tmp/usbradioplus-archive-keyring.gpg | awk -F: '$1 == "fpr" { print $10; exit }') && \
+	test "$fingerprint" = A0D5A79E0F5C45E9E63679950951502BAC795E55 && \
+	install -d -m 0755 /etc/apt/keyrings && \
+	install -m 0644 /tmp/usbradioplus-archive-keyring.gpg /etc/apt/keyrings/usbradioplus.gpg && \
+	rm -f /tmp/usbradioplus-archive-keyring.gpg && \
+	printf 'deb [signed-by=/etc/apt/keyrings/usbradioplus.gpg] https://cpeter1207.github.io/USBRadioPlus trixie main\n' \
+		> /etc/apt/sources.list.d/usbradioplus.list && \
+	apt-get update && \
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+		librptadvsignaling1=0.1.0~alpha1-1 librptadvsignaling-dev=0.1.0~alpha1-1 && \
+	rm -rf /var/lib/apt/lists/*
+
 ENV RPTADV_COVERAGE_TOOLCHAIN=${RUST_NIGHTLY}
 
 WORKDIR /workspace
