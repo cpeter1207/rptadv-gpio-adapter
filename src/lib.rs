@@ -6,9 +6,14 @@
 #![deny(warnings)]
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
+mod context;
 mod ffi;
 mod parallel;
 mod signaling_client;
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod context_tests;
 
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
@@ -273,6 +278,23 @@ pub struct AdapterDescriptor {
     parallel_set_binary_channel: extern "C" fn(*mut parallel::ParallelDevice, u8) -> c_int,
     parallel_program_rtx: extern "C" fn(*mut parallel::ParallelDevice, u32, u32, u32, u32) -> c_int,
     parallel_clear_rtx_transmit: extern "C" fn(*mut parallel::ParallelDevice) -> c_int,
+    context_create: unsafe extern "C" fn(
+        *const context::ContextConfig,
+        *const context::Transport,
+        *mut *mut context::Context,
+    ) -> c_int,
+    context_get_port:
+        unsafe extern "C" fn(*const context::Context, u64, *mut *const context::Port) -> c_int,
+    context_snapshot:
+        unsafe extern "C" fn(*const context::Context, *mut context::SafetySnapshot) -> c_int,
+    port_snapshot: unsafe extern "C" fn(*const context::Port, *mut context::PortSnapshot) -> c_int,
+    context_destroy: unsafe extern "C" fn(*mut context::Context),
+    device_capabilities:
+        unsafe extern "C" fn(*const GpioDevice, *mut context::PortCapabilities) -> c_int,
+    parallel_capabilities: unsafe extern "C" fn(
+        *const parallel::ParallelDevice,
+        *mut context::PortCapabilities,
+    ) -> c_int,
 }
 
 /// The descriptor contains immutable function and static-data pointers only.
@@ -1418,6 +1440,33 @@ extern "C" fn device_close(device: *mut GpioDevice) {
 }
 
 /// Immutable descriptor valid for the shared object's complete lifetime.
+/// Report facts from the selected CM119 map, without assigning ordinary pins.
+unsafe extern "C" fn device_capabilities(
+    device: *const GpioDevice,
+    output: *mut context::PortCapabilities,
+) -> c_int {
+    let Some(device) = (unsafe { device.as_ref() }) else {
+        return GPIO_INVALID_ARGUMENT;
+    };
+    if !unsafe { context::fits(output) } {
+        return GPIO_INVALID_ARGUMENT;
+    }
+    unsafe {
+        *output = context::PortCapabilities {
+            struct_size: size_of::<context::PortCapabilities>() as u32,
+            inputs: context::INPUT_COR | context::INPUT_CTCSS,
+            outputs: context::OUTPUT_PTT,
+            input_pin_mask: u64::from(
+                device.profile.valid_gpio_mask & !device.gpio_output_enable_mask,
+            ),
+            output_pin_mask: u64::from(device.gpio_output_enable_mask),
+            ..Default::default()
+        }
+    };
+    GPIO_OK
+}
+
+/// Immutable descriptor valid for the shared object's complete lifetime.
 static DESCRIPTOR: AdapterDescriptor = AdapterDescriptor {
     struct_size: size_of::<AdapterDescriptor>() as u32,
     abi_version: ABI_VERSION,
@@ -1446,6 +1495,13 @@ static DESCRIPTOR: AdapterDescriptor = AdapterDescriptor {
     parallel_set_binary_channel: parallel::parallel_set_binary_channel,
     parallel_program_rtx: parallel::parallel_program_rtx,
     parallel_clear_rtx_transmit: parallel::parallel_clear_rtx_transmit,
+    context_create: context::context_create,
+    context_get_port: context::context_get_port,
+    context_snapshot: context::context_snapshot,
+    port_snapshot: context::port_snapshot,
+    context_destroy: context::context_destroy,
+    device_capabilities,
+    parallel_capabilities: parallel::capabilities,
 };
 
 /// Return the stable adapter descriptor.

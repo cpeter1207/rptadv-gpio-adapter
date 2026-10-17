@@ -86,6 +86,28 @@ pub struct ParallelDevice {
     pulse: signaling_client::Pulse,
 }
 
+/// Report raw status/data register masks, not invented COR or CTCSS assignments.
+pub(crate) unsafe extern "C" fn capabilities(
+    device: *const ParallelDevice,
+    output: *mut crate::context::PortCapabilities,
+) -> c_int {
+    let Some(device) = (unsafe { device.as_ref() }) else {
+        return GPIO_INVALID_ARGUMENT;
+    };
+    if !unsafe { crate::context::fits(output) } {
+        return GPIO_INVALID_ARGUMENT;
+    }
+    unsafe {
+        *output = crate::context::PortCapabilities {
+            struct_size: size_of::<crate::context::PortCapabilities>() as u32,
+            input_pin_mask: 0xf8 << 8,
+            output_pin_mask: u64::from(device.output_enable_mask),
+            ..Default::default()
+        }
+    };
+    GPIO_OK
+}
+
 /// C-compatible selection of one parallel-port transport.
 #[repr(C)]
 pub(crate) struct ParallelConfig {
@@ -1123,6 +1145,22 @@ mod tests {
                 .expect("released signaling pulse"),
             state,
         )
+    }
+
+    #[test]
+    fn context_parallel_capabilities_are_raw_unassigned_pins() {
+        let (device, _) = fake_device(&ffi_config());
+        let mut caps = crate::context::PortCapabilities {
+            struct_size: size_of::<crate::context::PortCapabilities>() as u32,
+            ..Default::default()
+        };
+        assert_eq!(unsafe { capabilities(&device, &mut caps) }, GPIO_OK);
+        assert_eq!(caps.inputs, 0);
+        assert_eq!(caps.outputs, 0);
+        assert_eq!(caps.safety, 0);
+        assert_eq!(caps.readback, 0);
+        assert_eq!(caps.input_pin_mask, 0xf800);
+        assert_eq!(caps.output_pin_mask, 15);
     }
 
     #[test]

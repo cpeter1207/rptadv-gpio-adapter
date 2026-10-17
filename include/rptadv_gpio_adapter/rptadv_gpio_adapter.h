@@ -12,6 +12,7 @@
 #define RPTADV_GPIO_ADAPTER_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -443,6 +444,109 @@ struct rptadv_gpio_device_stats {
  * built against an earlier header must compare @ref struct_size before calling
  * an appended function pointer.
  */
+/** @brief Opaque control-owned normalized hardware context. */
+struct rptadv_gpio_context;
+/** @brief Stable borrowed port; stop its audio owner before context destruction. */
+struct rptadv_gpio_port;
+
+/** @brief Normalized input/output flags; these are signals, not port numbers. */
+enum rptadv_gpio_signal {
+    RPTADV_GPIO_INPUT_COR = 1, /**< Normalized carrier indication. */
+    RPTADV_GPIO_INPUT_CTCSS = 2, /**< External decoder indication. */
+    RPTADV_GPIO_OUTPUT_PTT = 1, /**< Logical transmitter key. */
+    RPTADV_GPIO_OUTPUT_CTCSS = 2, /**< External encoder enable. */
+    RPTADV_GPIO_OUTPUT_MUTE_A = 4, /**< TX leg A mute. */
+    RPTADV_GPIO_OUTPUT_MUTE_B = 8, /**< TX leg B mute. */
+    RPTADV_GPIO_OUTPUT_SITE = 16 /**< Covered site actuator enable. */
+};
+
+/** @brief Actual port facilities. Unassigned raw pins imply no radio signals. */
+struct rptadv_gpio_port_capabilities {
+    uint32_t struct_size; /**< Available record size. */
+    uint32_t inputs; /**< Normalized input mask. */
+    uint32_t outputs; /**< Normalized output mask. */
+    uint64_t input_pin_mask; /**< Backend logical raw inputs; parallel status uses bits 8–15. */
+    uint64_t output_pin_mask; /**< Backend logical raw outputs. */
+    uint32_t readback; /**< Outputs with independent readback. */
+    uint32_t safety; /**< Bits: arm feedback, watchdog, mute A, mute B, site gate. */
+};
+/** @brief Copied configured port; IDs need not be consecutive. */
+struct rptadv_gpio_port_config {
+    uint32_t struct_size; /**< Available record size. */
+    uint64_t port_id; /**< Unique within this context. */
+    struct rptadv_gpio_port_capabilities capabilities; /**< Real endpoint facilities. */
+    uint32_t required_inputs; /**< Missing required signals reject setup. */
+    uint32_t required_outputs; /**< Missing required signals reject setup. */
+};
+/** @brief Context setup; no fixed port-count ceiling. */
+struct rptadv_gpio_context_config {
+    uint32_t struct_size; /**< Available record size. */
+    uint32_t safety_contract; /**< 0 ordinary, 1 physical appliance interlock. */
+    const struct rptadv_gpio_port_config *ports; /**< Copied array. */
+    size_t port_count; /**< Number of readable array entries. */
+    uint64_t arm_timeout_ns; /**< Backend arm-ack deadline duration. */
+    uint64_t maximum_snapshot_age_ns; /**< Backend freshness bound. */
+};
+/** @brief Fresh common-interlock inputs, normalized by the service transport. */
+struct rptadv_gpio_safety_input {
+    uint32_t struct_size; /**< Available record size. */
+    uint64_t sampled_at_ns; /**< Monotonic observation time. */
+    uint32_t valid; /**< 0 or 1. */
+    uint32_t health; /**< Input/main power, reset released, watchdog, transport bits. */
+    uint32_t arm_feedback; /**< Independent physical arm feedback, 0 or 1. */
+    uint32_t arm_epoch; /**< Epoch acknowledged by that feedback. */
+};
+/** @brief Per-port sample in configured order. */
+struct rptadv_gpio_port_input {
+    uint32_t struct_size; /**< Available record size. */
+    uint32_t present; /**< Required endpoint is present, 0 or 1. */
+    uint32_t inputs; /**< Normalized input values. */
+    uint32_t valid_inputs; /**< Inputs sampled successfully. */
+    uint32_t confirmed_outputs; /**< Actual readback, never inferred from writes. */
+    uint32_t confirmed_valid; /**< Valid readback mask; zero means unavailable. */
+};
+/** @brief Preallocated transport output span. */
+struct rptadv_gpio_port_output {
+    uint32_t struct_size; /**< Available record size. */
+    uint64_t port_id; /**< Endpoint identity. */
+    uint32_t outputs; /**< Requested normalized output flags. */
+};
+/** @brief Borrowed transport; every function is control-owner-only. */
+struct rptadv_gpio_transport {
+    uint32_t struct_size; /**< Available record size. */
+    void *context; /**< Borrowed until GPIO context destruction. */
+    int32_t (*sample)(void *, uint64_t, struct rptadv_gpio_safety_input *,
+        struct rptadv_gpio_port_input *, size_t); /**< Fill current observations. */
+    int32_t (*request_arm)(void *, uint32_t); /**< Submit an epoch-tagged arm request. */
+    int32_t (*apply_outputs)(void *, const struct rptadv_gpio_port_output *, size_t); /**< Submit prepared outputs. */
+    int32_t (*safe_outputs)(void *); /**< Disarm, release PTT/encoder, mute both legs, disable site outputs. */
+};
+/** @brief Bounded atomic common state observation, never an admission token by itself. */
+struct rptadv_gpio_safety_snapshot {
+    uint32_t struct_size; /**< Caller sets available size. */
+    uint32_t state; /**< 0 disarmed, 1 arming, 2 armed, 3 faulted. */
+    uint32_t epoch; /**< Current generation token. */
+    uint32_t health; /**< Last normalized health bits. */
+    uint32_t fault; /**< Latched fault reason. */
+    uint32_t arm_feedback; /**< Last independently observed hardware arm state. */
+    uint32_t safe_submission_failed; /**< Safe command failed; physical release unconfirmed. */
+};
+/** @brief Requested and independently confirmed per-port state. */
+struct rptadv_gpio_port_snapshot {
+    uint32_t struct_size; /**< Caller sets available size. */
+    uint64_t port_id; /**< Endpoint identity. */
+    uint32_t epoch; /**< Current context generation. */
+    uint32_t present; /**< Endpoint present. */
+    uint32_t ready; /**< Current-generation radio warm-up confirmed. */
+    uint32_t retired; /**< Lease no longer usable. */
+    uint32_t inputs; /**< Normalized sampled inputs. */
+    uint32_t valid_inputs; /**< Successfully sampled inputs. */
+    uint32_t requested_outputs; /**< Current-generation intent or safe values. */
+    uint32_t confirmed_outputs; /**< Physical output readback. */
+    uint32_t confirmed_valid; /**< Available readback mask, zero if unavailable. */
+};
+
+/** @brief Immutable shared-object function table; check size before each tail. */
 struct rptadv_gpio_adapter_descriptor {
 	/** Size of this descriptor. */
 	uint32_t struct_size;
@@ -611,6 +715,13 @@ struct rptadv_gpio_adapter_descriptor {
 	 */
 	enum rptadv_gpio_result (*parallel_clear_rtx_transmit)(
 		struct rptadv_gpio_parallel_device *device);
+    int32_t (*context_create)(const struct rptadv_gpio_context_config *, const struct rptadv_gpio_transport *, struct rptadv_gpio_context **); /**< Copy setup and submit safe outputs. */
+    int32_t (*context_get_port)(const struct rptadv_gpio_context *, uint64_t, const struct rptadv_gpio_port **); /**< Borrow stable handle. */
+    int32_t (*context_snapshot)(const struct rptadv_gpio_context *, struct rptadv_gpio_safety_snapshot *); /**< Atomic common observation. */
+    int32_t (*port_snapshot)(const struct rptadv_gpio_port *, struct rptadv_gpio_port_snapshot *); /**< Atomic port observation. */
+    void (*context_destroy)(struct rptadv_gpio_context *); /**< All audio owners must first be quiescent; submits safe outputs. */
+    int32_t (*device_capabilities)(const struct rptadv_gpio_device *, struct rptadv_gpio_port_capabilities *); /**< Actual CM119 map facilities. */
+    int32_t (*parallel_capabilities)(const struct rptadv_gpio_parallel_device *, struct rptadv_gpio_port_capabilities *); /**< Raw pins only until explicitly assigned. */
 };
 
 /**

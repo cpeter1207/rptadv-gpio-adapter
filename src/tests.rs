@@ -114,6 +114,22 @@ fn fake_device(config: &DeviceConfig) -> (GpioDevice, Arc<Mutex<FakeState>>) {
     fake_device_with_product(config, 0x0008)
 }
 
+#[test]
+fn context_cm119_capabilities_do_not_fabricate_encoder_or_interlock() {
+    let (device, _) = fake_device(&ffi_config());
+    let mut caps = context::PortCapabilities {
+        struct_size: size_of::<context::PortCapabilities>() as u32,
+        ..Default::default()
+    };
+    assert_eq!(unsafe { device_capabilities(&device, &mut caps) }, GPIO_OK);
+    assert_eq!(caps.inputs, context::INPUT_COR | context::INPUT_CTCSS);
+    assert_eq!(caps.outputs, context::OUTPUT_PTT);
+    assert_eq!(caps.safety, 0);
+    assert_eq!(caps.readback, 0);
+    assert_eq!(caps.output_pin_mask, 1);
+    assert_eq!(caps.input_pin_mask & caps.output_pin_mask, 0);
+}
+
 /// Construct one fake device for a specific USB product and return its observable state.
 fn fake_device_with_product(
     config: &DeviceConfig,
@@ -649,7 +665,7 @@ fn public_ffi_layouts_are_stable() {
         offset_of!(AdapterDescriptor, parallel_clear_rtx_transmit),
         200
     );
-    assert_eq!(size_of::<AdapterDescriptor>(), 208);
+    assert_eq!(offset_of!(AdapterDescriptor, context_create), 208);
 }
 
 /// Verify the default C-Media family selector and optional interface suffix normalize safely.
