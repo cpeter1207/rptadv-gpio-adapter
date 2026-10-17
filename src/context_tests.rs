@@ -420,6 +420,19 @@ fn context_arm_and_fault_matrix() {
         hardware.health = HEALTH_ALL;
         assert_ne!(unsafe { context_service(runtime.0, 104) }, GPIO_OK);
         assert_eq!(runtime.snapshot().state, FAULTED);
+        assert_eq!(unsafe { context_recover(runtime.0, 105) }, GPIO_OK);
+        runtime.ready(7);
+        let request_epoch = runtime.snapshot().epoch;
+        assert_eq!(
+            unsafe { context_request_arm(runtime.0, request_epoch, 106) },
+            GPIO_OK
+        );
+        assert_eq!(runtime.snapshot().state, ARMING);
+        hardware.health &= !(1 << health_bit);
+        assert_ne!(unsafe { context_service(runtime.0, 107) }, GPIO_OK);
+        assert_eq!(runtime.snapshot().state, FAULTED);
+        assert_ne!(runtime.publish(0, request_epoch, OUTPUT_PTT), GPIO_OK);
+        assert!(hardware.applied.iter().all(|p| p.outputs == OUTPUT_MUTES));
     }
 }
 
