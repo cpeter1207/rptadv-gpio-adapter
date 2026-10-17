@@ -67,7 +67,7 @@ _Static_assert(offsetof(struct rptadv_gpio_adapter_descriptor,
 _Static_assert(offsetof(struct rptadv_gpio_adapter_descriptor,
 			parallel_clear_rtx_transmit) == 200,
 	       "RTX transmit clear must append after RTX programming");
-_Static_assert(sizeof(struct rptadv_gpio_adapter_descriptor) == 208,
+_Static_assert(offsetof(struct rptadv_gpio_adapter_descriptor, context_create) == 208,
 	       "unexpected CM119 descriptor ABI");
 
 int main(void)
