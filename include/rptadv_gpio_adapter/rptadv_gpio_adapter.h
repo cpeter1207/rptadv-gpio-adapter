@@ -533,7 +533,7 @@ struct rptadv_gpio_safety_snapshot {
     uint32_t state; /**< 0 disarmed, 1 arming, 2 armed, 3 faulted. */
     uint32_t epoch; /**< Current generation token. */
     uint32_t health; /**< Last normalized health bits. */
-    uint32_t fault; /**< Latched fault reason. */
+    uint32_t fault; /**< 0 none, 1 health/observation, 2 transport, 3 arm timeout, 4 epoch exhausted, 5 monotonic time. */
     uint32_t arm_feedback; /**< Last independently observed hardware arm state. */
     uint32_t safe_submission_failed; /**< Safe command failed; physical release unconfirmed. */
 };
@@ -542,7 +542,7 @@ struct rptadv_gpio_port_snapshot {
     uint32_t struct_size; /**< Caller sets available size. */
     uint64_t port_id; /**< Endpoint identity. */
     uint32_t epoch; /**< Current context generation. */
-    uint32_t present; /**< Endpoint present. */
+    uint32_t present; /**< Endpoint observed present; zero when faulted, uninitialized, or retired. */
     uint32_t ready; /**< Current-generation radio warm-up confirmed. */
     uint32_t retired; /**< Lease no longer usable. */
     uint32_t inputs; /**< Normalized sampled inputs. */

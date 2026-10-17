@@ -2,11 +2,28 @@ use crate::{GPIO_INVALID_ARGUMENT, GPIO_IO_ERROR, GPIO_OK, GPIO_UNSUPPORTED, con
 use std::{ffi::c_void, mem::size_of, ptr, slice};
 
 thread_local! { static CHECK_ALLOCATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+thread_local! { static FAIL_ALLOCATION: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
 static CALLBACK_ALLOCATIONS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 struct TestAllocator;
 unsafe impl std::alloc::GlobalAlloc for TestAllocator {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        if FAIL_ALLOCATION
+            .try_with(|counter| match counter.get() {
+                Some(0) => {
+                    counter.set(None);
+                    true
+                }
+                Some(n) => {
+                    counter.set(Some(n - 1));
+                    false
+                }
+                None => false,
+            })
+            .unwrap_or(false)
+        {
+            return ptr::null_mut();
+        }
         if CHECK_ALLOCATIONS
             .try_with(|enabled| enabled.get())
             .unwrap_or(false)
@@ -35,6 +52,7 @@ pub(super) struct Hardware {
     observation_offset: i64,
     applied: Vec<PortOutput>,
     readback: u32,
+    malformed: u32,
 }
 
 impl Default for Hardware {
@@ -52,6 +70,7 @@ impl Default for Hardware {
             observation_offset: 0,
             applied: Vec::new(),
             readback: 0,
+            malformed: 0,
         }
     }
 }
@@ -103,6 +122,21 @@ unsafe extern "C" fn sample(
             confirmed_outputs: hardware.applied.get(i).map_or(OUTPUT_MUTES, |p| p.outputs),
             ..Default::default()
         };
+        match hardware.malformed {
+            4 => port.struct_size = 0,
+            5 => port.valid_inputs = 0,
+            6 => port.inputs = 128,
+            7 => port.valid_inputs = 128 | INPUT_COR,
+            _ => (),
+        }
+    }
+    unsafe {
+        match hardware.malformed {
+            1 => (*safety).struct_size = 0,
+            2 => (*safety).valid = 0,
+            3 => (*safety).arm_feedback = 2,
+            _ => (),
+        }
     }
     GPIO_OK
 }
@@ -520,6 +554,17 @@ fn context_safety_fault_releases_all_covered_outputs() {
         }
         assert_ne!(unsafe { context_service(runtime.0, 103) }, GPIO_OK);
         assert_eq!(runtime.snapshot().state, FAULTED);
+        let mut snapshot = PortSnapshot {
+            struct_size: size_of::<PortSnapshot>() as u32,
+            ..Default::default()
+        };
+        assert_eq!(
+            unsafe { port_snapshot(runtime.port(0), &mut snapshot) },
+            GPIO_OK
+        );
+        assert_eq!(snapshot.valid_inputs, 0);
+        assert_eq!(snapshot.confirmed_valid, 0);
+        assert_eq!(snapshot.present, 0);
         assert!(hardware.applied.iter().all(|p| p.outputs == OUTPUT_MUTES));
     }
 }
@@ -596,4 +641,281 @@ fn context_failed_disarm_is_a_latched_fault() {
     assert_eq!(unsafe { context_disarm(runtime.0) }, GPIO_IO_ERROR);
     assert_eq!(runtime.snapshot().state, FAULTED);
     assert_eq!(runtime.snapshot().safe_submission_failed, 1);
+}
+
+#[test]
+fn context_all_ffi_boundaries_reject_null_and_short_records() {
+    let mut hardware = Hardware::default();
+    let runtime = Runtime::new(&mut hardware, 1, true);
+    let configs = ports(1, true);
+    let cfg = config(&configs, true);
+    let io = transport(&mut hardware);
+    let mut result = ptr::null_mut();
+    let mut endpoint = ptr::null();
+    let mut short = 0_u32;
+    unsafe {
+        assert_eq!(
+            context_create(&cfg, &io, ptr::null_mut()),
+            GPIO_INVALID_ARGUMENT
+        );
+        for bad in [ptr::null(), ptr::from_ref(&short)] {
+            assert_eq!(
+                context_create(&cfg, bad.cast(), &mut result),
+                GPIO_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                port_publish(runtime.port(0), bad.cast()),
+                GPIO_INVALID_ARGUMENT
+            );
+        }
+        for bad in [ptr::null_mut(), ptr::from_mut(&mut short)] {
+            assert_eq!(
+                context_snapshot(runtime.0, bad.cast()),
+                GPIO_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                port_snapshot(runtime.port(0), bad.cast()),
+                GPIO_INVALID_ARGUMENT
+            );
+        }
+        assert_eq!(
+            context_get_port(runtime.0, 1000, ptr::null_mut()),
+            GPIO_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            context_get_port(ptr::null(), 1000, &mut endpoint),
+            GPIO_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            context_get_port(runtime.0, 999, &mut endpoint),
+            GPIO_UNSUPPORTED
+        );
+        assert_eq!(
+            context_snapshot(ptr::null(), ptr::null_mut()),
+            GPIO_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            port_snapshot(ptr::null(), ptr::null_mut()),
+            GPIO_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            context_initialize(ptr::null_mut(), 1),
+            GPIO_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            context_request_arm(ptr::null_mut(), 0, 1),
+            GPIO_INVALID_ARGUMENT
+        );
+        assert_eq!(context_disarm(ptr::null_mut()), GPIO_INVALID_ARGUMENT);
+        assert_eq!(context_recover(ptr::null_mut(), 1), GPIO_INVALID_ARGUMENT);
+        assert_eq!(context_service(ptr::null_mut(), 1), GPIO_INVALID_ARGUMENT);
+        assert_eq!(port_retire(ptr::null_mut(), 1000, 0), GPIO_INVALID_ARGUMENT);
+        assert_eq!(port_ready(ptr::null(), 0), GPIO_INVALID_ARGUMENT);
+        assert_eq!(
+            port_publish(ptr::null(), ptr::null()),
+            GPIO_INVALID_ARGUMENT
+        );
+        context_destroy(ptr::null_mut());
+    }
+}
+
+#[test]
+fn context_setup_invalid_fields_and_allocation_failures() {
+    let mut hardware = Hardware::default();
+    let mut result = ptr::null_mut();
+    for field in 0..18 {
+        let mut ports = ports(1, true);
+        let mut c = config(&ports, true);
+        let mut io = transport(&mut hardware);
+        match field {
+            0 => c.safety_contract = 2,
+            1 => c.ports = ptr::null(),
+            2 => c.maximum_snapshot_age_ns = 0,
+            3 => io.sample = None,
+            4 => io.apply_outputs = None,
+            5 => io.safe_outputs = None,
+            6 => c.arm_timeout_ns = 0,
+            7 => ports[0].struct_size = 0,
+            8 => ports[0].capabilities.struct_size = 0,
+            9 => ports[0].capabilities.inputs = 128,
+            10 => ports[0].capabilities.outputs = 128,
+            11 => ports[0].capabilities.readback = 128,
+            12 => ports[0].capabilities.safety = 128,
+            13 => {
+                ports[0].capabilities.input_pin_mask = 1;
+                ports[0].capabilities.output_pin_mask = 1;
+            }
+            14 => ports[0].required_inputs = INPUT_CTCSS,
+            15 => ports[0].capabilities.safety = 0,
+            // The first larger port allocation succeeds; fail each remaining fallible allocation.
+            16 => FAIL_ALLOCATION.with(|counter| counter.set(Some(2))),
+            _ => FAIL_ALLOCATION.with(|counter| counter.set(Some(3))),
+        }
+        let code = unsafe { context_create(&c, &io, &mut result) };
+        FAIL_ALLOCATION.with(|counter| counter.set(None));
+        assert_ne!(code, GPIO_OK, "field {field}");
+        assert!(result.is_null());
+    }
+}
+
+#[test]
+fn context_every_setup_allocation_can_fail_without_aborting() {
+    let mut hardware = Hardware::default();
+    let ports = ports(1, true);
+    let cfg = config(&ports, true);
+    let io = transport(&mut hardware);
+    for allocation in 0..5 {
+        let mut result = ptr::null_mut();
+        FAIL_ALLOCATION.with(|counter| counter.set(Some(allocation)));
+        let code = unsafe { context_create(&cfg, &io, &mut result) };
+        FAIL_ALLOCATION.with(|counter| counter.set(None));
+        assert_eq!(code, GPIO_IO_ERROR, "allocation {allocation}");
+        assert!(result.is_null());
+    }
+}
+
+#[test]
+fn context_malformed_samples_and_control_state_edges() {
+    for malformed in 1..=8 {
+        let mut hardware = Hardware::default();
+        let runtime = Runtime::new(&mut hardware, 1, true);
+        runtime.arm(&mut hardware, 1, 100);
+        if malformed == 8 {
+            hardware.readback = OUTPUT_PTT;
+        } else {
+            hardware.malformed = malformed;
+        }
+        assert_eq!(unsafe { context_service(runtime.0, 102) }, GPIO_IO_ERROR);
+        assert_eq!(runtime.snapshot().state, FAULTED);
+        assert_ne!(unsafe { context_initialize(runtime.0, 103) }, GPIO_OK);
+    }
+    let mut hardware = Hardware::default();
+    let runtime = Runtime::new(&mut hardware, 2, true);
+    assert_ne!(unsafe { context_service(runtime.0, 99) }, GPIO_OK);
+    assert_eq!(unsafe { context_initialize(runtime.0, 100) }, GPIO_OK);
+    runtime.ready(2);
+    let epoch = runtime.snapshot().epoch;
+    assert_ne!(
+        unsafe { context_request_arm(runtime.0, epoch - 1, 100) },
+        GPIO_OK
+    );
+    assert_ne!(unsafe { port_ready(runtime.port(0), epoch - 1) }, GPIO_OK);
+    assert_ne!(unsafe { port_retire(runtime.0, 999, epoch) }, GPIO_OK);
+    assert_ne!(unsafe { port_retire(runtime.0, 1000, epoch - 1) }, GPIO_OK);
+    hardware.health = 0;
+    assert_eq!(
+        unsafe { context_request_arm(runtime.0, epoch, 100) },
+        GPIO_IO_ERROR
+    );
+    hardware.health = HEALTH_ALL;
+    assert_eq!(unsafe { context_recover(runtime.0, 200) }, GPIO_OK);
+    runtime.ready(2);
+    assert_eq!(
+        unsafe { context_request_arm(runtime.0, runtime.snapshot().epoch, 200) },
+        GPIO_OK
+    );
+    hardware.feedback = true;
+    assert_eq!(unsafe { context_service(runtime.0, 200) }, GPIO_OK);
+    assert_eq!(runtime.snapshot().state, ARMING); // Same-time feedback is not fresh.
+    assert_eq!(unsafe { context_service(runtime.0, 201) }, GPIO_OK);
+    assert_eq!(
+        runtime.publish(0, runtime.snapshot().epoch, 128),
+        GPIO_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        runtime.publish(0, runtime.snapshot().epoch, OUTPUT_CTCSS),
+        GPIO_INVALID_ARGUMENT
+    );
+    hardware.feedback = false;
+    assert_eq!(unsafe { context_service(runtime.0, 202) }, GPIO_IO_ERROR);
+    assert_eq!(unsafe { context_recover(runtime.0, u64::MAX - 1) }, GPIO_OK);
+    runtime.ready(2);
+    assert_eq!(
+        unsafe { context_request_arm(runtime.0, runtime.snapshot().epoch, u64::MAX - 1) },
+        GPIO_IO_ERROR
+    );
+}
+
+#[test]
+fn context_ordinary_readiness_retired_ports_and_real_readback() {
+    let mut hardware = Hardware::default();
+    let mut ports = ports(2, false);
+    ports[1].capabilities.readback = OUTPUT_PTT;
+    let mut handle = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            context_create(
+                &config(&ports, false),
+                &transport(&mut hardware),
+                &mut handle,
+            )
+        },
+        GPIO_OK
+    );
+    let runtime = Runtime(handle);
+    assert_eq!(unsafe { context_initialize(runtime.0, 100) }, GPIO_OK);
+    assert_eq!(unsafe { context_service(runtime.0, 100) }, GPIO_OK);
+    assert_eq!(runtime.snapshot().state, DISARMED);
+    assert_eq!(
+        unsafe { port_retire(runtime.0, 1000, runtime.snapshot().epoch) },
+        GPIO_OK
+    );
+    assert_eq!(unsafe { context_initialize(runtime.0, 101) }, GPIO_OK);
+    assert_eq!(
+        unsafe { port_ready(runtime.port(0), runtime.snapshot().epoch) },
+        GPIO_UNSUPPORTED
+    );
+    assert_eq!(
+        unsafe { port_ready(runtime.port(1), runtime.snapshot().epoch) },
+        GPIO_OK
+    );
+    assert_eq!(
+        unsafe { context_request_arm(runtime.0, runtime.snapshot().epoch, 101) },
+        GPIO_UNSUPPORTED
+    );
+    assert_eq!(unsafe { context_service(runtime.0, 102) }, GPIO_OK);
+    assert_eq!(
+        runtime.publish(0, runtime.snapshot().epoch, OUTPUT_PTT),
+        GPIO_UNSUPPORTED
+    );
+    assert_eq!(
+        runtime.publish(1, runtime.snapshot().epoch, OUTPUT_PTT),
+        GPIO_OK
+    );
+    assert_eq!(unsafe { context_service(runtime.0, 103) }, GPIO_OK);
+    hardware.readback = OUTPUT_PTT;
+    assert_eq!(unsafe { context_service(runtime.0, 104) }, GPIO_OK);
+    let mut snapshot = PortSnapshot {
+        struct_size: size_of::<PortSnapshot>() as u32,
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe { port_snapshot(runtime.port(1), &mut snapshot) },
+        GPIO_OK
+    );
+    assert_eq!(snapshot.confirmed_valid, OUTPUT_PTT);
+    assert_eq!(snapshot.confirmed_outputs, OUTPUT_PTT);
+}
+
+#[test]
+fn context_arm_wait_and_changed_feedback_are_not_admitted() {
+    let mut hardware = Hardware::default();
+    let runtime = Runtime::new(&mut hardware, 1, true);
+    hardware.fail_safe = true;
+    assert_eq!(unsafe { context_initialize(runtime.0, 100) }, GPIO_IO_ERROR);
+    hardware.fail_safe = false;
+    assert_eq!(unsafe { context_recover(runtime.0, 101) }, GPIO_OK);
+    assert_eq!(unsafe { context_service(runtime.0, 101) }, GPIO_OK);
+    runtime.ready(1);
+    assert_eq!(
+        unsafe { context_request_arm(runtime.0, runtime.snapshot().epoch, 102) },
+        GPIO_OK
+    );
+    assert_eq!(unsafe { context_service(runtime.0, 103) }, GPIO_OK);
+    assert_eq!(runtime.snapshot().state, ARMING);
+    assert_eq!(unsafe { context_recover(runtime.0, 103) }, GPIO_UNSUPPORTED);
+    hardware.feedback = true;
+    assert_eq!(unsafe { context_service(runtime.0, 104) }, GPIO_OK);
+    hardware.arm_epoch += 1;
+    assert_eq!(unsafe { context_service(runtime.0, 105) }, GPIO_IO_ERROR);
 }

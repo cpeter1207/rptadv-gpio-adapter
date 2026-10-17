@@ -6,14 +6,12 @@
 
 use crate::{GPIO_INVALID_ARGUMENT, GPIO_IO_ERROR, GPIO_OK, GPIO_UNSUPPORTED};
 use std::{
+    alloc::{Layout, alloc},
     cell::UnsafeCell,
     ffi::{c_int, c_void},
     mem::size_of,
     ptr, slice,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 /// Normalized input signal bits, not port indices or physical pad numbers.
@@ -167,7 +165,7 @@ pub(crate) struct PortSnapshot {
     pub(crate) confirmed_valid: u32,
 }
 
-/// Shared admission survives moving a control-owned Context value during setup.
+/// Context-owned admission; borrowed ports never outlive this stable allocation.
 struct Admission {
     word: AtomicU64,
 }
@@ -175,7 +173,7 @@ struct Admission {
 /// Opaque stable endpoint. Setup allocation is the only source of port-count limits.
 pub(crate) struct Port {
     config: PortConfig,
-    admission: Arc<Admission>,
+    admission: *const Admission,
     ready: AtomicU32,
     retired: AtomicU32,
     intent: AtomicU64,
@@ -185,7 +183,7 @@ pub(crate) struct Port {
 /// Control-owned context; only snapshots and prepared publication may run concurrently.
 pub(crate) struct Context {
     ports: Vec<Port>,
-    admission: Arc<Admission>,
+    admission: Box<Admission>,
     transport: Transport,
     control: UnsafeCell<Control>,
 }
@@ -216,6 +214,26 @@ fn storage<T>(count: usize) -> Result<Vec<T>, c_int> {
         .try_reserve_exact(count)
         .map_err(|_| GPIO_IO_ERROR)?;
     Ok(storage)
+}
+
+/// Stable control-owned storage with an explicit allocation error at the C boundary.
+fn boxed<T>(value: T) -> Result<Box<T>, c_int> {
+    let pointer = unsafe { alloc(Layout::new::<T>()) }.cast::<T>();
+    if pointer.is_null() {
+        return Err(GPIO_IO_ERROR);
+    }
+    // The global allocator/layout match Box; initialized ownership is transferred once.
+    unsafe {
+        pointer.write(value);
+        Ok(Box::from_raw(pointer))
+    }
+}
+
+impl Port {
+    /// Context destruction requires all borrowed port users to be quiescent.
+    fn admission(&self) -> &Admission {
+        unsafe { &*self.admission }
+    }
 }
 
 /// Setup-only validation uses signal sets independently of the number of ports.
@@ -274,9 +292,12 @@ pub(crate) unsafe extern "C" fn context_create(
         Err(e) => return e,
     };
     let configs = unsafe { slice::from_raw_parts(config.ports, config.port_count) };
-    let admission = Arc::new(Admission {
+    let admission = match boxed(Admission {
         word: AtomicU64::new((1_u64 << 32) | u64::from(DISARMED)),
-    });
+    }) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     for config in configs {
         if let Err(e) = valid_port(config, appliance) {
             return e;
@@ -286,7 +307,7 @@ pub(crate) unsafe extern "C" fn context_create(
         }
         ports.push(Port {
             config: *config,
-            admission: Arc::clone(&admission),
+            admission: ptr::from_ref(&*admission),
             ready: AtomicU32::new(0),
             retired: AtomicU32::new(0),
             intent: AtomicU64::new(0),
@@ -306,7 +327,7 @@ pub(crate) unsafe extern "C" fn context_create(
     if unsafe { transport.safe_outputs.expect("validated")(transport.context) } != GPIO_OK {
         return GPIO_IO_ERROR;
     }
-    let context = Box::new(Context {
+    let context = match boxed(Context {
         ports,
         admission,
         transport,
@@ -322,7 +343,10 @@ pub(crate) unsafe extern "C" fn context_create(
             inputs,
             outputs,
         }),
-    });
+    }) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     unsafe { *output = Box::into_raw(context) };
     GPIO_OK
 }
@@ -384,10 +408,16 @@ pub(crate) unsafe extern "C" fn port_snapshot(
     if !unsafe { fits(output) } {
         return GPIO_INVALID_ARGUMENT;
     }
-    let admission = port.admission.word.load(Ordering::Acquire);
+    let admission = port.admission().word.load(Ordering::Acquire);
     let epoch = (admission >> 32) as u32;
     let intent = port.intent.load(Ordering::Acquire);
-    let observation = port.observation.load(Ordering::Acquire);
+    // Revocation clears INITIALIZED before any transport call or observation reset.
+    let observation =
+        if admission as u32 & INITIALIZED != 0 && port.retired.load(Ordering::Acquire) == 0 {
+            port.observation.load(Ordering::Acquire)
+        } else {
+            0
+        };
     unsafe {
         *output = PortSnapshot {
             struct_size: size_of::<PortSnapshot>() as u32,
@@ -440,6 +470,7 @@ impl Context {
         );
         for port in &self.ports {
             port.ready.store(0, Ordering::Release);
+            port.observation.store(0, Ordering::Release);
         }
         next.is_some()
     }
@@ -607,7 +638,7 @@ pub(crate) unsafe extern "C" fn port_ready(port: *const Port, epoch: u32) -> c_i
     let Some(port) = (unsafe { port.as_ref() }) else {
         return GPIO_INVALID_ARGUMENT;
     };
-    let word = port.admission.word.load(Ordering::Acquire);
+    let word = port.admission().word.load(Ordering::Acquire);
     if word as u32 & (3 | INITIALIZED) != INITIALIZED
         || (word >> 32) as u32 != epoch
         || port.retired.load(Ordering::Acquire) != 0
@@ -704,7 +735,7 @@ pub(crate) unsafe extern "C" fn port_publish(
     {
         return GPIO_INVALID_ARGUMENT;
     }
-    let word = port.admission.word.load(Ordering::Acquire);
+    let word = port.admission().word.load(Ordering::Acquire);
     if word as u32 & 3 != ARMED
         || (word >> 32) as u32 != action.epoch
         || port.ready.load(Ordering::Acquire) != action.epoch
@@ -833,6 +864,7 @@ mod tests {
         assert_eq!(unsafe { port_snapshot(port, &mut status) }, GPIO_OK);
         assert_eq!(status.requested_outputs, OUTPUT_MUTES);
         port.ready.store(old, Ordering::Release);
+        assert_eq!(unsafe { context_service(runtime.0, 203) }, GPIO_OK);
         assert_ne!(
             unsafe {
                 port_publish(
@@ -863,5 +895,60 @@ mod tests {
         assert_eq!(runtime.snapshot().fault, FAULT_EPOCH);
         assert_eq!(unsafe { context_recover(runtime.0, 101) }, GPIO_IO_ERROR);
         assert_eq!(runtime.snapshot().epoch, u32::MAX);
+    }
+
+    #[test]
+    fn context_admission_exhaustion_and_retired_publication_stay_safe() {
+        for appliance in [false, true] {
+            let mut hardware = Hardware::default();
+            let runtime = Runtime::new(&mut hardware, 1, appliance);
+            let context = unsafe { &*runtime.0 };
+            assert_eq!(unsafe { context_initialize(runtime.0, 100) }, GPIO_OK);
+            if appliance {
+                runtime.arm(&mut hardware, 1, 100);
+            }
+            // Admit from the last epoch; there is no wraparound token available.
+            context.admission.word.store(
+                (u64::from(u32::MAX) << 32)
+                    | u64::from(INITIALIZED | if appliance { ARMING } else { DISARMED }),
+                Ordering::Release,
+            );
+            context.ports[0].ready.store(u32::MAX, Ordering::Release);
+            assert_eq!(unsafe { context_service(runtime.0, 102) }, GPIO_IO_ERROR);
+            assert_eq!(runtime.snapshot().state, FAULTED);
+            assert_eq!(unsafe { context_disarm(runtime.0) }, GPIO_IO_ERROR);
+            unsafe { (*context.control.get()).last_time_ns = None };
+            context.admission.word.store(
+                (2_u64 << 32) | u64::from(ARMED | INITIALIZED),
+                Ordering::Release,
+            );
+            context.ports[0].ready.store(2, Ordering::Release);
+            context.ports[0].retired.store(1, Ordering::Release);
+            context.ports[0]
+                .intent
+                .store((2_u64 << 32) | u64::from(OUTPUT_PTT), Ordering::Release);
+            let mut snapshot = PortSnapshot {
+                struct_size: size_of::<PortSnapshot>() as u32,
+                ..Default::default()
+            };
+            assert_eq!(
+                unsafe { port_snapshot(&context.ports[0], &mut snapshot) },
+                GPIO_OK
+            );
+            assert_eq!(snapshot.requested_outputs, OUTPUT_MUTES);
+            assert_eq!(
+                unsafe {
+                    port_publish(
+                        &context.ports[0],
+                        &OutputIntent {
+                            struct_size: size_of::<OutputIntent>() as u32,
+                            epoch: 2,
+                            outputs: OUTPUT_PTT,
+                        },
+                    )
+                },
+                GPIO_UNSUPPORTED
+            );
+        }
     }
 }

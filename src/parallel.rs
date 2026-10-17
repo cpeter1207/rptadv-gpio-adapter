@@ -1161,6 +1161,19 @@ mod tests {
         assert_eq!(caps.readback, 0);
         assert_eq!(caps.input_pin_mask, 0xf800);
         assert_eq!(caps.output_pin_mask, 15);
+        assert_eq!(
+            unsafe { capabilities(ptr::null(), &mut caps) },
+            GPIO_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            unsafe { capabilities(&device, ptr::null_mut()) },
+            GPIO_INVALID_ARGUMENT
+        );
+        caps.struct_size = 0;
+        assert_eq!(
+            unsafe { capabilities(&device, &mut caps) },
+            GPIO_INVALID_ARGUMENT
+        );
     }
 
     #[test]
