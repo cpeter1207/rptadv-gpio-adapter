@@ -295,6 +295,14 @@ pub struct AdapterDescriptor {
         *const parallel::ParallelDevice,
         *mut context::PortCapabilities,
     ) -> c_int,
+    context_initialize: unsafe extern "C" fn(*mut context::Context, u64) -> c_int,
+    port_ready: unsafe extern "C" fn(*const context::Port, u32) -> c_int,
+    context_request_arm: unsafe extern "C" fn(*mut context::Context, u32, u64) -> c_int,
+    context_disarm: unsafe extern "C" fn(*mut context::Context) -> c_int,
+    context_recover: unsafe extern "C" fn(*mut context::Context, u64) -> c_int,
+    context_service: unsafe extern "C" fn(*mut context::Context, u64) -> c_int,
+    port_publish: unsafe extern "C" fn(*const context::Port, *const context::OutputIntent) -> c_int,
+    port_retire: unsafe extern "C" fn(*mut context::Context, u64, u32) -> c_int,
 }
 
 /// The descriptor contains immutable function and static-data pointers only.
@@ -1502,6 +1510,14 @@ static DESCRIPTOR: AdapterDescriptor = AdapterDescriptor {
     context_destroy: context::context_destroy,
     device_capabilities,
     parallel_capabilities: parallel::capabilities,
+    context_initialize: context::context_initialize,
+    port_ready: context::port_ready,
+    context_request_arm: context::context_request_arm,
+    context_disarm: context::context_disarm,
+    context_recover: context::context_recover,
+    context_service: context::context_service,
+    port_publish: context::port_publish,
+    port_retire: context::port_retire,
 };
 
 /// Return the stable adapter descriptor.

@@ -511,6 +511,12 @@ struct rptadv_gpio_port_output {
     uint64_t port_id; /**< Endpoint identity. */
     uint32_t outputs; /**< Requested normalized output flags. */
 };
+/** @brief Single audio producer's complete epoch-tagged action. */
+struct rptadv_gpio_output_intent {
+    uint32_t struct_size; /**< Available record size. */
+    uint32_t epoch; /**< Current armed epoch, obtained from a snapshot. */
+    uint32_t outputs; /**< Supported outputs; encoder requires PTT. */
+};
 /** @brief Borrowed transport; every function is control-owner-only. */
 struct rptadv_gpio_transport {
     uint32_t struct_size; /**< Available record size. */
@@ -722,6 +728,14 @@ struct rptadv_gpio_adapter_descriptor {
     void (*context_destroy)(struct rptadv_gpio_context *); /**< All audio owners must first be quiescent; submits safe outputs. */
     int32_t (*device_capabilities)(const struct rptadv_gpio_device *, struct rptadv_gpio_port_capabilities *); /**< Actual CM119 map facilities. */
     int32_t (*parallel_capabilities)(const struct rptadv_gpio_parallel_device *, struct rptadv_gpio_port_capabilities *); /**< Raw pins only until explicitly assigned. */
+    int32_t (*context_initialize)(struct rptadv_gpio_context *, uint64_t); /**< Control-only initialization, never automatic arm. */
+    int32_t (*port_ready)(const struct rptadv_gpio_port *, uint32_t); /**< Control confirms current-epoch radio and processor warm-up. */
+    int32_t (*context_request_arm)(struct rptadv_gpio_context *, uint32_t, uint64_t); /**< Explicit physical arm transaction. */
+    int32_t (*context_disarm)(struct rptadv_gpio_context *); /**< Invalidate admission before safe-output I/O. */
+    int32_t (*context_recover)(struct rptadv_gpio_context *, uint64_t); /**< Repeat initialization; no automatic arm. */
+    int32_t (*context_service)(struct rptadv_gpio_context *, uint64_t); /**< Sole non-audio owner samples and applies outputs. */
+    int32_t (*port_publish)(const struct rptadv_gpio_port *, const struct rptadv_gpio_output_intent *); /**< Bounded atomic publication; never transport I/O. */
+    int32_t (*port_retire)(struct rptadv_gpio_context *, uint64_t, uint32_t); /**< After port audio quiescence, disarm context and retire its ID. */
 };
 
 /**
