@@ -736,6 +736,18 @@ struct rptadv_gpio_adapter_descriptor {
     int32_t (*context_service)(struct rptadv_gpio_context *, uint64_t); /**< Sole non-audio owner samples and applies outputs. */
     int32_t (*port_publish)(const struct rptadv_gpio_port *, const struct rptadv_gpio_output_intent *); /**< Bounded atomic publication; never transport I/O. */
     int32_t (*port_retire)(struct rptadv_gpio_context *, uint64_t, uint32_t); /**< After port audio quiescence, disarm context and retire its ID. */
+    /**
+     * @brief Write a complete safe physical byte and release the parallel owner.
+     * @param device Live handle, exclusively owned with all callers quiescent.
+     * @param outputs Enabled data bits to leave high, including the owner's
+     * deasserted PTT level. This provider does not know radio pin assignments.
+     * @return RPTADV_GPIO_OK consumes the handle. Any error retains ownership
+     * for retry; an invalid mask performs no write. Do not call parallel_close
+     * after success, since the handle has been freed. Existing parallel_close
+     * still drives all data bits low. This operation runs only on control.
+     */
+    int32_t (*parallel_close_outputs)(struct rptadv_gpio_parallel_device *device,
+                                    uint32_t outputs);
 };
 
 /**

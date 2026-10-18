@@ -69,6 +69,9 @@ _Static_assert(offsetof(struct rptadv_gpio_adapter_descriptor,
 	       "RTX transmit clear must append after RTX programming");
 _Static_assert(offsetof(struct rptadv_gpio_adapter_descriptor, context_create) == 208,
 	       "unexpected CM119 descriptor ABI");
+_Static_assert(offsetof(struct rptadv_gpio_adapter_descriptor, parallel_close_outputs) ==
+	       offsetof(struct rptadv_gpio_adapter_descriptor, port_retire) + sizeof(void *),
+	       "safe parallel close must append after the existing ABI-1 prefix");
 
 int main(void)
 {
@@ -148,6 +151,7 @@ int main(void)
 	assert(descriptor->parallel_get_inputs != NULL);
 	assert(descriptor->parallel_get_stats != NULL);
 	assert(descriptor->parallel_close != NULL);
+	assert(descriptor->parallel_close_outputs(NULL, 0) == RPTADV_GPIO_INVALID_ARGUMENT);
 	assert(descriptor->device_publish_inverting_pulse != NULL);
 	assert(descriptor->parallel_publish_inverting_pulse != NULL);
 	assert(descriptor->device_schedule_inverting_pulse != NULL);
