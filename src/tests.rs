@@ -626,6 +626,10 @@ fn descriptor_exposes_the_cm119_hid_contract() {
     assert_ne!(descriptor.parallel_get_inputs as usize, 0);
     assert_ne!(descriptor.parallel_get_stats as usize, 0);
     assert_ne!(descriptor.parallel_close as usize, 0);
+    assert_eq!(
+        (descriptor.parallel_close_outputs)(ptr::null_mut(), 0),
+        GPIO_INVALID_ARGUMENT
+    );
     assert_ne!(descriptor.device_publish_inverting_pulse as usize, 0);
     assert_ne!(descriptor.parallel_publish_inverting_pulse as usize, 0);
     assert_ne!(descriptor.device_schedule_inverting_pulse as usize, 0);

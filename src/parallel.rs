@@ -960,6 +960,30 @@ pub(crate) extern "C" fn parallel_close(device: *mut ParallelDevice) {
     device.close();
 }
 
+/// Close with the owner's complete safe physical byte, preserving the handle on error.
+///
+/// The caller must quiesce every user of the handle and include deasserted radio
+/// signaling levels. This raw-pin provider does not know PTT polarity or assignments.
+pub(crate) extern "C" fn parallel_close_outputs(
+    device: *mut ParallelDevice,
+    outputs: u32,
+) -> c_int {
+    // SAFETY: descriptor callers provide a live, exclusively owned handle or null.
+    let Some(borrowed) = (unsafe { device.as_ref() }) else {
+        return GPIO_INVALID_ARGUMENT;
+    };
+    let result = borrowed.control_write_data(outputs);
+    if result != GPIO_OK {
+        return result;
+    }
+    // SAFETY: a successful final write transfers ownership exactly once. Dropping
+    // the transport releases it without invoking the zero-output close operation.
+    unsafe {
+        drop(Box::from_raw(device));
+    }
+    GPIO_OK
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
@@ -1768,6 +1792,43 @@ mod tests {
         };
         assert_eq!(device.inputs(&mut inputs), GPIO_OK);
         assert_eq!(inputs.online, 0);
+    }
+
+    /// Invalid/failing shutdown retains ownership; successful shutdown preserves final levels.
+    #[test]
+    fn site_final_outputs_close_only_after_successful_write() {
+        assert_eq!(
+            (crate::DESCRIPTOR.parallel_close_outputs)(ptr::null_mut(), 0),
+            GPIO_INVALID_ARGUMENT
+        );
+        let (device, state) = fake_device(&ffi_config());
+        let device = Box::into_raw(Box::new(device));
+        for mask in [0x10, 0x100] {
+            assert_eq!(
+                (crate::DESCRIPTOR.parallel_close_outputs)(device, mask),
+                GPIO_INVALID_ARGUMENT
+            );
+            assert!(state.lock().unwrap().writes.is_empty());
+        }
+        state.lock().unwrap().next_write_error = Some(-71);
+        assert_eq!(
+            (crate::DESCRIPTOR.parallel_close_outputs)(device, 8),
+            GPIO_IO_ERROR
+        );
+        assert_eq!(
+            parallel_service(device),
+            GPIO_OK,
+            "failed close retains a usable owner"
+        );
+        assert_eq!(
+            (crate::DESCRIPTOR.parallel_close_outputs)(device, 8),
+            GPIO_OK
+        );
+        assert_eq!(
+            state.lock().unwrap().writes,
+            [1, 8],
+            "successful close must not add a zero write"
+        );
     }
 
     /// Preserve active-low channel selection, RTX transmit polarity, and immediate TX clear.

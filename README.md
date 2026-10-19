@@ -63,6 +63,16 @@ performs all pin writes and RTX settling delays. RTX programming retains the
 legacy 20-bit most-significant-bit order, settling intervals, always-low
 TX-power bit, and immediate TX-clear behavior.
 
+To leave parallel outputs at configured safe levels when closing a port, use
+`parallel_close_outputs`. Stop all other users of the handle first. Supply the
+complete physical output byte, including the level that releases PTT. A
+successful call frees the handle; an error leaves it available for retry. Do
+not close or use the handle again after success. The `parallel_close` operation
+drives all data pins low. Both operations belong on the control thread.
+
+Check the descriptor size before calling `parallel_close_outputs`; the operation
+is at the end of the ABI-1 table. The shared library remains SONAME 1.
+
 ## Build
 
 Install `libusb-1.0-0-dev`, released `librptadvsignaling-dev` ABI 1
