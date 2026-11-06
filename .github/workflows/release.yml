@@ -15,3 +15,5 @@ jobs:
     with:
       code_ref: ${{ github.sha }}
       tag: ${{ github.ref_name }}
+    secrets:
+      APT_INDEX_DISPATCH_TOKEN: ${{ secrets.APT_INDEX_DISPATCH_TOKEN }}
