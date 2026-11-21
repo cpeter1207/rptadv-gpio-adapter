@@ -23,3 +23,10 @@ make container-coverage
 It removes only stale containers belonging to this workspace before and after
 the command.  The launcher pulls the maintained `:latest` base image and
 prints its resulting digest before ordinary remote-image runs.
+
+The coverage run builds unit tests and the exported shared library under the
+same instrumentation environment. It also runs the C descriptor/device callers
+and the serial/keyboard fixtures against that exact library, then supplies its
+coverage map when combining the profiles. The ordinary native test target uses
+the same boundary fixtures. Syscall and libusb interposition is confined to the
+test processes; the adapter keeps its real dynamic production dependencies.

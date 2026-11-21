@@ -389,3 +389,51 @@ static SERIAL: SerialDescriptor = SerialDescriptor {
 pub extern "C" fn rptadv_gpio_serial_descriptor() -> *const SerialDescriptor {
     &SERIAL
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poisoned_retirement_lock_preserves_the_exclusive_owner() {
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _held = PENDING.lock().unwrap();
+                panic!("injected control-owner failure");
+            })
+            .is_err()
+        );
+        let file = File::open("/dev/null").unwrap();
+        let id = file.metadata().unwrap().rdev();
+        let device = Box::into_raw(Box::new(SerialDevice {
+            ready: false,
+            id,
+            file,
+            outputs: 0,
+            idle: 0,
+        }));
+        // SAFETY: the test transfers its sole live owner to the retirement API.
+        unsafe { quarantine(device) };
+        let config = SerialConfig {
+            size: size_of::<SerialConfig>() as u32,
+            version: ABI_VERSION,
+            path: c"/dev/null".as_ptr(),
+            baud: 9600,
+            data_bits: 8,
+            parity: 0,
+            stop_half_bits: 2,
+            outputs: 0,
+            idle: 0,
+        };
+        let mut output = ptr::null_mut();
+        // SAFETY: both records remain live; /dev/null cannot confirm UART idle.
+        assert_eq!(unsafe { open(&config, &mut output) }, GPIO_IO_ERROR);
+        assert!(output.is_null());
+        let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, id);
+        pending.clear();
+        PENDING.clear_poison();
+    }
+}

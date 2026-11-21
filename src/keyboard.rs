@@ -10,11 +10,10 @@ use std::ptr;
 
 // Linux input-event-codes.h KEY_MAX is 0x2ff; both deployed architectures use asm-generic ioctl encoding.
 const BYTES: usize = 96;
-const fn read_keys(number: u32) -> libc::c_ulong {
-    ((2u32 << 30) | ((BYTES as u32) << 16) | ((b'E' as u32) << 8) | number) as libc::c_ulong
-}
-const SUPPORTED: libc::c_ulong = read_keys(0x21); // EVIOCGBIT(EV_KEY, BYTES)
-const PRESSED: libc::c_ulong = read_keys(0x18); // EVIOCGKEY(BYTES)
+const KEY_QUERY: libc::c_ulong =
+    ((2u32 << 30) | ((BYTES as u32) << 16) | ((b'E' as u32) << 8)) as libc::c_ulong;
+const SUPPORTED: libc::c_ulong = KEY_QUERY | 0x21; // EVIOCGBIT(EV_KEY, BYTES)
+const PRESSED: libc::c_ulong = KEY_QUERY | 0x18; // EVIOCGKEY(BYTES)
 
 pub struct Keyboard {
     file: File,

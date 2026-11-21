@@ -80,12 +80,12 @@ quality: lint static-analysis docs
 
 lint:
 	$(CARGO_FMT) --check
-	$(SHELLCHECK) tools/run-in-quality-container.sh
+	$(SHELLCHECK) tools/run-in-quality-container.sh tests/coverage.sh tests/native.sh
 
 static-analysis:
 	$(CARGO_CLIPPY) --all-targets --all-features -- -D warnings
-	$(CPPCHECK) --force --enable=warning,style,performance,portability \
-		--error-exitcode=1 --std=c11 -Iinclude $(C_SMOKE_SOURCE)
+	$(CPPCHECK) --force --check-level=exhaustive --enable=warning,style,performance,portability \
+		--error-exitcode=1 --std=c11 -Iinclude $(C_SMOKE_SOURCE) tests/device_smoke.c tests/usb_fixture.c tests/modem_ioctl.c
 
 docs: | build
 	$(DOXYGEN) Doxyfile
@@ -93,11 +93,8 @@ docs: | build
 
 test:
 	$(CARGO) test --all-targets --locked
-	$(MAKE) $(C_SMOKE_BINARY)
-	./$(C_SMOKE_BINARY)
-	$(CC) -Wall -Wextra -Werror -shared -fPIC tests/modem_ioctl.c -o build/test-modem-ioctl.so -ldl
-	LD_PRELOAD=$(abspath build/test-modem-ioctl.so) $(PYTHON) tests/serial_tty.py $(LIBRARY_SONAME)
-	LD_PRELOAD=$(abspath build/test-modem-ioctl.so) $(PYTHON) tests/keyboard_input.py $(LIBRARY_SONAME)
+	$(MAKE) $(LIBRARY_LINK)
+	CC="$(CC)" PYTHON="$(PYTHON)" bash tests/native.sh "$(LIBRARY_SONAME)" build/native-tests
 
 $(C_SMOKE_BINARY): $(C_SMOKE_SOURCE) $(HEADER) $(LIBRARY_LINK) | build
 	$(CC) -std=c11 -Wall -Wextra -Werror -Iinclude $< -Lbuild \
@@ -107,7 +104,7 @@ coverage:
 	rm -rf $(COVERAGE_DIR) $(COVERAGE_TARGET_DIR)
 	mkdir -p $(COVERAGE_DIR)
 	RUSTUP_TOOLCHAIN=$(COVERAGE_TOOLCHAIN) CARGO_LLVM_COV_TARGET_DIR=$(abspath $(COVERAGE_TARGET_DIR)) \
-		$(CARGO_LLVM_COV) --all-targets --locked --branch --json --output-path $(COVERAGE_JSON)
+		bash tests/coverage.sh "$(CARGO)" "$(COVERAGE_DIR)" "$(COVERAGE_JSON)" $(CARGO_LLVM_COV)
 	$(PYTHON) -c 'import json, os, sys; report=json.load(open(sys.argv[1], encoding="utf-8")); root=os.path.realpath(sys.argv[2]); test=os.path.realpath(sys.argv[3]); files={}; [files.setdefault(path, entry["summary"]) for datum in report.get("data", []) for entry in datum.get("files", []) for path in (os.path.realpath(entry["filename"]),) if os.path.commonpath((root,path)) == root and path != test and "{}tests{}".format(os.path.sep,os.path.sep) not in path]; failures=[(path,metric,summary.get(metric,{})) for path,summary in sorted(files.items()) for metric in ("lines","branches") if not isinstance(summary.get(metric),dict) or summary[metric].get("covered") != summary[metric].get("count")]; print("verified production coverage for {} source files".format(len(files))); [print("{}: {} {}/{}".format(path,metric,values.get("covered","missing"),values.get("count","missing")),file=sys.stderr) for path,metric,values in failures]; raise SystemExit(1 if not files or failures else 0)' $(COVERAGE_JSON) $(COVERAGE_PRODUCTION_ROOT) $(COVERAGE_TEST_MODULE)
 
 quality-image:
