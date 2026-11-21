@@ -1,3 +1,10 @@
+rptadv-gpio-adapter (0.1.0~alpha5-1) UNRELEASED; urgency=medium
+
+  * Add checked serial modem and held-key evdev capabilities to SONAME 1.
+  * Allow CM119 input acquisition with the dedicated PTT output undriven.
+
+ -- codex <codex@localhost>  Fri, 20 Nov 2026 23:00:00 -0600
+
 rptadv-gpio-adapter (0.1.0~alpha4-1) unstable; urgency=medium
 
   * Preserve caller-selected safe parallel output levels when closing the port.

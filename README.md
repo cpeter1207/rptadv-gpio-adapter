@@ -71,7 +71,15 @@ not close or use the handle again after success. The `parallel_close` operation
 drives all data pins low. Both operations belong on the control thread.
 
 Check the descriptor size before calling `parallel_close_outputs`; the operation
-is at the end of the ABI-1 table. The shared library remains SONAME 1.
+follows the port retirement prefix. The shared library remains SONAME 1.
+
+## Dedicated physical signals
+
+Check the descriptor size before reading each appended operation. `device_open_without_ptt` keeps the CM119 dedicated PTT pin electrically undriven while serving the selected input and spare GPIO pins. Serial and keyboard getters return independent immutable ABI-1 tables. Check the size, version, capability string and required functions and retain the GPIO DSO through final close.
+
+The `rptadv.serial-modem1` owner requires a dedicated Linux tty. Select any combination of CTS, DSR, DCD and RI inputs. Output bit 0 is RTS and bit 1 is DTR. Supply physical idle levels for every selected output. `service_outputs` sets independent active bits and returns driver-reported input and output levels. Unselected RTS/DTR lines remain released. The tty owner disables hardware and software flow control. Stop all users before close. A failed idle confirmation retains the same handle for retry.
+
+The `rptadv.evdev-held-key1` owner opens an explicit Linux input-event pathname read-only, verifies its supported EV_KEY codes and reads instantaneous held states. Codes range from 1 to 767. For two codes, output bits zero and one follow their supplied order. Failed or truncated acquisition clears the output word and returns an error. Use these operations on a serialized non-real-time worker.
 
 ## Build
 

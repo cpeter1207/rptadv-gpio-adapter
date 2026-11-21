@@ -552,6 +552,9 @@ struct rptadv_gpio_port_snapshot {
     uint32_t confirmed_valid; /**< Available readback mask, zero if unavailable. */
 };
 
+struct rptadv_gpio_serial_api;
+struct rptadv_gpio_keyboard_api;
+
 /** @brief Immutable shared-object function table; check size before each tail. */
 struct rptadv_gpio_adapter_descriptor {
 	/** Size of this descriptor. */
@@ -748,6 +751,13 @@ struct rptadv_gpio_adapter_descriptor {
      */
     int32_t (*parallel_close_outputs)(struct rptadv_gpio_parallel_device *device,
                                     uint32_t outputs);
+    /** Open HID inputs and configured spare outputs, leaving the dedicated PTT pin undriven. */
+    int32_t (*device_open_without_ptt)(const struct rptadv_gpio_device_config *,
+                                     struct rptadv_gpio_device **);
+    /** Independent serial capability of this exact GPIO provider. */
+    const struct rptadv_gpio_serial_api *(*serial_descriptor)(void);
+    /** Non-grabbing Linux evdev held-key input capability. */
+    const struct rptadv_gpio_keyboard_api *(*keyboard_descriptor)(void);
 };
 
 /**
@@ -755,6 +765,67 @@ struct rptadv_gpio_adapter_descriptor {
  * @return Never-null pointer valid for the lifetime of the loaded shared object.
  */
 const struct rptadv_gpio_adapter_descriptor *rptadv_gpio_adapter_descriptor(void);
+
+/** Opaque Linux tty owner. All operations run on one non-real-time worker. */
+struct rptadv_gpio_serial_device;
+
+/** Dedicated serial endpoint. Hardware and software flow control are disabled. */
+struct rptadv_gpio_serial_config {
+    uint32_t struct_size; /**< Complete readable size. */
+    uint32_t abi_version; /**< One. */
+    const char *path; /**< Explicit NUL-terminated Linux tty pathname. */
+    uint32_t baud; /**< Positive line speed, negotiated at setup. */
+    uint32_t data_bits; /**< Five through eight. */
+    uint32_t parity; /**< Zero none, one odd, two even, three mark, four space. */
+    uint32_t stop_half_bits; /**< Two for one stop, three for one and a half, four for two. */
+    uint32_t outputs; /**< Bit 0 RTS and bit 1 DTR. Unselected outputs remain released. */
+    uint32_t idle; /**< Selected output bits held high at logical idle. */
+};
+
+/** Immutable independent modem-line descriptor on GPIO SONAME 1. */
+struct rptadv_gpio_serial_api {
+    uint32_t struct_size; /**< At least the complete published table. */
+    uint32_t abi_version; /**< One. */
+    const char *capability_name; /**< Exact NUL-terminated rptadv.serial-modem1. */
+    /** Open a dedicated tty exclusively, apply line settings and confirm idle outputs. */
+    int32_t (*open)(const struct rptadv_gpio_serial_config *, struct rptadv_gpio_serial_device **);
+    /** Service logical PTT and return driver-reported input (CTS/DSR/DCD/RI, bits 0..3)
+     * and output (RTS/DTR, bits 0..1) levels. Output words are invalid on error. */
+    int32_t (*service)(struct rptadv_gpio_serial_device *, uint32_t keyed,
+                       uint32_t *inputs, uint32_t *outputs);
+    /** Confirm idle and consume the handle. Failure retains exclusive ownership for retry. */
+    int32_t (*close)(struct rptadv_gpio_serial_device *);
+    /** Apply independent logical levels on the selected modem outputs. Physical levels
+     * equal active XOR configured idle. Readback uses the same masks as service. */
+    int32_t (*service_outputs)(struct rptadv_gpio_serial_device *, uint32_t active,
+                               uint32_t *inputs, uint32_t *outputs);
+    /** On failure a non-null result holds exclusive ownership solely for close retries. */
+    int32_t (*open_retiring)(const struct rptadv_gpio_serial_config *, struct rptadv_gpio_serial_device **);
+    /** Transfer an unverified owner to the adapter. Its next open retries idle before admission. */
+    void (*quarantine)(struct rptadv_gpio_serial_device *);
+};
+
+/** Get the independently size-, version- and identity-checked serial extension. */
+const struct rptadv_gpio_serial_api *rptadv_gpio_serial_descriptor(void);
+
+/** Opaque observation owner for one evdev endpoint. */
+struct rptadv_gpio_keyboard;
+/** Checked Linux evdev held-key operations on the non-real-time owner. */
+struct rptadv_gpio_keyboard_api {
+    uint32_t struct_size; /**< Size of the available table. */
+    uint32_t abi_version; /**< One. */
+    const char *capability_name; /**< Exact rptadv.evdev-held-key1. */
+    /** Open the named evdev device for observation, confirming one or two EV_KEY codes. */
+    int32_t (*open)(const char *, const uint32_t *, uint32_t, struct rptadv_gpio_keyboard **);
+    /** Return one bit per requested code in supplied order. Loss clears the word and returns a failure. */
+    int32_t (*sample)(struct rptadv_gpio_keyboard *, uint32_t *);
+    /** Consume one stopped observation owner. */
+    void (*close)(struct rptadv_gpio_keyboard *);
+    /** Bits per selected code for current presses and availability. Unavailable codes never assert. */
+    int32_t (*sample_valid)(struct rptadv_gpio_keyboard *, uint32_t *down, uint32_t *valid);
+};
+/** Return the static evdev observation table. */
+const struct rptadv_gpio_keyboard_api *rptadv_gpio_keyboard_descriptor(void);
 
 #ifdef __cplusplus
 }

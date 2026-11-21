@@ -13,7 +13,7 @@ PYTHON ?= python3
 
 PACKAGE := rptadv-gpio-adapter
 CRATE := rptadv_gpio_adapter
-PACKAGE_VERSION ?= 0.1.0-alpha.4
+PACKAGE_VERSION ?= 0.1.0-alpha.5
 SOVERSION := 1
 PREFIX ?= /usr/local
 DESTDIR ?=
@@ -95,6 +95,9 @@ test:
 	$(CARGO) test --all-targets --locked
 	$(MAKE) $(C_SMOKE_BINARY)
 	./$(C_SMOKE_BINARY)
+	$(CC) -Wall -Wextra -Werror -shared -fPIC tests/modem_ioctl.c -o build/test-modem-ioctl.so -ldl
+	LD_PRELOAD=$(abspath build/test-modem-ioctl.so) $(PYTHON) tests/serial_tty.py $(LIBRARY_SONAME)
+	LD_PRELOAD=$(abspath build/test-modem-ioctl.so) $(PYTHON) tests/keyboard_input.py $(LIBRARY_SONAME)
 
 $(C_SMOKE_BINARY): $(C_SMOKE_SOURCE) $(HEADER) $(LIBRARY_LINK) | build
 	$(CC) -std=c11 -Wall -Wextra -Werror -Iinclude $< -Lbuild \

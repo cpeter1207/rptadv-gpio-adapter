@@ -8,7 +8,9 @@
 
 mod context;
 mod ffi;
+mod keyboard;
 mod parallel;
+mod serial;
 mod signaling_client;
 
 #[cfg(test)]
@@ -304,6 +306,9 @@ pub struct AdapterDescriptor {
     port_publish: unsafe extern "C" fn(*const context::Port, *const context::OutputIntent) -> c_int,
     port_retire: unsafe extern "C" fn(*mut context::Context, u64, u32) -> c_int,
     parallel_close_outputs: extern "C" fn(*mut parallel::ParallelDevice, u32) -> c_int,
+    device_open_without_ptt: extern "C" fn(*const DeviceConfig, *mut *mut GpioDevice) -> c_int,
+    serial_descriptor: extern "C" fn() -> *const serial::SerialDescriptor,
+    keyboard_descriptor: extern "C" fn() -> *const keyboard::KeyboardDescriptor,
 }
 
 /// The descriptor contains immutable function and static-data pointers only.
@@ -440,6 +445,12 @@ impl Cm119Profile {
             }),
             _ => None,
         }
+    }
+
+    /// Keep the dedicated pin as an input when another actuator owns PTT.
+    fn disable_ptt(&mut self) {
+        self.gpio_control &= !self.ptt_mask;
+        self.ptt_mask = 0;
     }
 
     /// Decode one active-low input report into public logical states.
@@ -608,7 +619,7 @@ impl GpioDevice {
     fn publish_outputs(&self, action: &OutputAction) -> c_int {
         if action.struct_size < size_of::<OutputAction>() as u32
             || action.abi_version != ABI_VERSION
-            || action.ptt_asserted > 1
+            || action.ptt_asserted > u32::from(self.profile.ptt_mask != 0)
             || action.gpio_output_mask > u32::from(u8::MAX)
         {
             return GPIO_INVALID_ARGUMENT;
@@ -633,7 +644,7 @@ impl GpioDevice {
     fn publish_inverting_pulse(&self, action: &InvertingPulseAction) -> c_int {
         if action.struct_size < size_of::<InvertingPulseAction>() as u32
             || action.abi_version != ABI_VERSION
-            || action.ptt_invert > 1
+            || action.ptt_invert > u32::from(self.profile.ptt_mask != 0)
             || action.gpio_invert_mask > u32::from(u8::MAX)
             || action.cancel_pulse > 1
             || (action.cancel_pulse != 0
@@ -668,7 +679,7 @@ impl GpioDevice {
     fn schedule_inverting_pulse(&self, action: &ScheduledInvertingPulseAction) -> c_int {
         if action.struct_size < size_of::<ScheduledInvertingPulseAction>() as u32
             || action.abi_version != ABI_VERSION
-            || action.ptt_invert > 1
+            || action.ptt_invert > u32::from(self.profile.ptt_mask != 0)
             || action.ptt_cancel > 1
             || action.gpio_invert_mask > u32::from(u8::MAX)
             || action.gpio_cancel_mask > u32::from(u8::MAX)
@@ -1326,15 +1337,34 @@ extern "C" fn device_discover(list: *mut DeviceList) -> c_int {
 
 /// Open and exclusively claim one configured CM119 HID interface.
 extern "C" fn device_open(config: *const DeviceConfig, device: *mut *mut GpioDevice) -> c_int {
+    open_cm119(config, device, true)
+}
+
+/// Acquire CM119 inputs/spares without electrically enabling its dedicated PTT pin.
+extern "C" fn device_open_without_ptt(
+    config: *const DeviceConfig,
+    device: *mut *mut GpioDevice,
+) -> c_int {
+    open_cm119(config, device, false)
+}
+
+fn open_cm119(
+    config: *const DeviceConfig,
+    device: *mut *mut GpioDevice,
+    enable_ptt: bool,
+) -> c_int {
     if device.is_null() {
         return GPIO_INVALID_ARGUMENT;
     }
     // SAFETY: caller supplied writable output storage and it is initialized before failure paths.
     unsafe { *device = ptr::null_mut() };
     // SAFETY: public configuration is read-only and fully validated before opening hardware.
-    let Some(config) = (unsafe { ValidatedConfig::from_ffi(config) }) else {
+    let Some(mut config) = (unsafe { ValidatedConfig::from_ffi(config) }) else {
         return GPIO_INVALID_ARGUMENT;
     };
+    if !enable_ptt {
+        config.profile.disable_ptt();
+    }
     match LibusbHid::open(&config) {
         Ok(opened) => finish_device_open(
             device,
@@ -1464,7 +1494,7 @@ unsafe extern "C" fn device_capabilities(
         *output = context::PortCapabilities {
             struct_size: size_of::<context::PortCapabilities>() as u32,
             inputs: context::INPUT_COR | context::INPUT_CTCSS,
-            outputs: context::OUTPUT_PTT,
+            outputs: u32::from(device.profile.ptt_mask != 0) * context::OUTPUT_PTT,
             input_pin_mask: u64::from(
                 device.profile.valid_gpio_mask & !device.gpio_output_enable_mask,
             ),
@@ -1520,6 +1550,9 @@ static DESCRIPTOR: AdapterDescriptor = AdapterDescriptor {
     port_publish: context::port_publish,
     port_retire: context::port_retire,
     parallel_close_outputs: parallel::parallel_close_outputs,
+    device_open_without_ptt,
+    serial_descriptor: serial::rptadv_gpio_serial_descriptor,
+    keyboard_descriptor: keyboard::rptadv_gpio_keyboard_descriptor,
 };
 
 /// Return the stable adapter descriptor.
