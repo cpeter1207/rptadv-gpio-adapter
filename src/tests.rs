@@ -2306,3 +2306,72 @@ fn libusb_backend_covers_null_context_handle_and_candidate_short_circuits() {
     );
     drop(backend_guard);
 }
+
+/// Inspect the actual HID reports sent at service and close for every wiring profile.
+#[test]
+fn selected_non_usb_ptt_never_enables_the_dedicated_pin_in_a_hid_write() {
+    for raw_profile in 0..=3 {
+        let mut cfg = ffi_config();
+        cfg.profile = raw_profile;
+        cfg.ptt_inverted = 1;
+        cfg.gpio_output_enable_mask = 0;
+        cfg.gpio_output_initial_mask = 0;
+        let mut setup = validated(&cfg);
+        let dedicated = setup.profile.ptt_mask;
+        setup.profile.disable_ptt();
+        let state = Arc::new(Mutex::new(FakeState::default()));
+        let transport = FakeTransport {
+            state: state.clone(),
+            next_write_error: None,
+        };
+        let mut device = GpioDevice::with_transport(setup, Box::new(transport), 0x0008).unwrap();
+        let request = OutputAction {
+            struct_size: size_of::<OutputAction>() as u32,
+            abi_version: ABI_VERSION,
+            ptt_asserted: 1,
+            gpio_output_mask: 0,
+        };
+        assert_eq!(device.publish_outputs(&request), GPIO_INVALID_ARGUMENT);
+        assert_eq!(device.service(), GPIO_OK);
+        device.close();
+        let seen = state.lock().unwrap();
+        assert!(!seen.writes.is_empty());
+        assert!(
+            seen.writes
+                .iter()
+                .all(|report| (report[1] | report[2]) & dedicated == 0)
+        );
+    }
+}
+
+/// Public non-PTT acquisition must keep the dedicated output electrically disabled.
+#[test]
+fn public_non_ptt_open_preserves_dedicated_pin_direction() {
+    let (guard, state) = install_fake_libusb();
+    let mut config = ffi_config();
+    config.gpio_output_enable_mask = 0;
+    config.gpio_output_initial_mask = 0;
+    let mut device = ptr::null_mut();
+    assert_eq!(device_open_without_ptt(&config, &mut device), GPIO_OK);
+    assert!(!device.is_null());
+    assert_eq!(device_service(device), GPIO_OK);
+    device_close(device);
+    let seen = state.lock().unwrap();
+    assert!(!seen.writes.is_empty());
+    assert!(
+        seen.writes
+            .iter()
+            .all(|report| (report[1] | report[2]) & 0x04 == 0)
+    );
+    drop(seen);
+    drop(guard);
+}
+
+/// A failed EEPROM read command must restore the published GPIO state.
+#[test]
+fn failed_eeprom_read_command_restores_outputs() {
+    let (device, state) = fake_device_failing_on_write(&ffi_config(), 1);
+    let mut image = eeprom_image(ABI_VERSION);
+    assert_eq!(device.read_eeprom(&mut image), GPIO_USB_ERROR);
+    assert_eq!(state.lock().unwrap().writes, vec![[0, 0x01, 0x05, 0]]);
+}

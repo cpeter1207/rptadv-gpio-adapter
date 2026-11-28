@@ -73,6 +73,20 @@ _Static_assert(offsetof(struct rptadv_gpio_adapter_descriptor, parallel_close_ou
 	       offsetof(struct rptadv_gpio_adapter_descriptor, port_retire) + sizeof(void *),
 	       "safe parallel close must append after the existing ABI-1 prefix");
 
+_Static_assert(offsetof(struct rptadv_gpio_adapter_descriptor, device_open_without_ptt) ==
+	       offsetof(struct rptadv_gpio_adapter_descriptor, parallel_close_outputs) + sizeof(void *),
+	       "the published safe-close ABI must retain its entire prefix");
+_Static_assert(offsetof(struct rptadv_gpio_serial_api, service_outputs) ==
+	       offsetof(struct rptadv_gpio_serial_api, close) + sizeof(void *),
+	       "independent serial outputs must follow the original modem operations");
+
+_Static_assert(offsetof(struct rptadv_gpio_serial_api, open_retiring) ==
+               offsetof(struct rptadv_gpio_serial_api, service_outputs) + sizeof(void *),
+               "failed startup handoff must preserve the serial prefix");
+_Static_assert(offsetof(struct rptadv_gpio_keyboard_api, sample_valid) ==
+               offsetof(struct rptadv_gpio_keyboard_api, close) + sizeof(void *),
+               "per-code validity must preserve the keyboard prefix");
+
 int main(void)
 {
 	const struct rptadv_gpio_adapter_descriptor *descriptor =
@@ -165,6 +179,20 @@ int main(void)
 	       RPTADV_GPIO_INVALID_ARGUMENT);
 	assert(descriptor->parallel_clear_rtx_transmit(NULL) ==
 	       RPTADV_GPIO_INVALID_ARGUMENT);
+	const struct rptadv_gpio_serial_api *serial = rptadv_gpio_serial_descriptor();
+	const struct rptadv_gpio_keyboard_api *keyboard = rptadv_gpio_keyboard_descriptor();
+	assert(descriptor->device_open_without_ptt != NULL);
+	assert(descriptor->serial_descriptor() == serial);
+	assert(serial->struct_size == sizeof(*serial) && serial->abi_version == 1);
+	assert(strcmp(serial->capability_name, "rptadv.serial-modem1") == 0);
+	assert(serial->open_retiring(NULL, NULL) == RPTADV_GPIO_INVALID_ARGUMENT);
+        assert(serial->quarantine != NULL);
+        assert(serial->service_outputs(NULL, 0, NULL, NULL) == RPTADV_GPIO_INVALID_ARGUMENT);
+	assert(descriptor->keyboard_descriptor() == keyboard);
+	assert(keyboard->struct_size == sizeof(*keyboard) && keyboard->abi_version == 1);
+	assert(strcmp(keyboard->capability_name, "rptadv.evdev-held-key1") == 0);
+	assert(keyboard->sample_valid(NULL, NULL, NULL) == RPTADV_GPIO_INVALID_ARGUMENT);
+        assert(keyboard->sample(NULL, NULL) == RPTADV_GPIO_INVALID_ARGUMENT);
 	assert(config.vendor_id == 0);
 	assert(inputs.abi_version == 0);
 	assert(output.ptt_asserted == 0);

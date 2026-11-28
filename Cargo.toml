@@ -1,6 +1,6 @@
 [package]
 name = "rptadv-gpio-adapter"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-2.0-only"
@@ -11,6 +11,9 @@ publish = false
 [lib]
 name = "rptadv_gpio_adapter"
 crate-type = ["cdylib"]
+
+[dependencies]
+libc = "0.2"
 
 [profile.release]
 codegen-units = 1
